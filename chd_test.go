@@ -406,8 +406,9 @@ func TestBuilderSetProgressChan(t *testing.T) {
 	retBuilder := b.ProgressChan(ch)
 
 	assert.Same(t, b, retBuilder, "ProgressChan should return the builder instance")
-	assert.NotNil(t, b.progressChan, "progressChan should be set")
-	assert.Same(t, ch, b.progressChan, "progressChan should be the one provided")
+	assert.NotNil(t, b.progressChan, "progressChan should be set after calling ProgressChan")
+	// Use assert.Equal for channels as types might differ (chan T vs chan<- T)
+	assert.Equal(t, ch, b.progressChan, "progressChan should be the one provided")
 
 	// Test setting it back to nil
 	retBuilder = b.ProgressChan(nil)
