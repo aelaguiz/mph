@@ -41,25 +41,64 @@ func (b bucketVector) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
 type CHDBuilder struct {
 	keys   [][]byte
 	values [][]byte
-	seed   int64
-	seeded bool
+
+	// User-configurable parameters
+	bucketRatio float64 // Ratio of initial buckets to keys (m/n). Default: 0.5
+	retryLimit  int     // Max attempts to find a collision-free hash for a bucket. Default: 10,000,000
+	userSeed    int64   // Seed provided by the user via Seed().
+	seedSetByUser bool  // Flag indicating if Seed() was called.
 }
 
 // Create a new CHD hash table builder.
+// Defaults: BucketRatio=0.5, RetryLimit=10,000,000, Seed=time-based.
 func Builder() *CHDBuilder {
-	return &CHDBuilder{}
+	return &CHDBuilder{
+		// Default values
+		bucketRatio: 0.5,
+		retryLimit:  10_000_000,
+		// userSeed defaults to 0
+		// seedSetByUser defaults to false
+	}
 }
 
-// Seed the RNG. This can be used to reproducible building.
-func (b *CHDBuilder) Seed(seed int64) {
-	b.seed = seed
-	b.seeded = true
+// Seed the internal random number generator.
+// Calling this ensures reproducible builds for the same set of keys added in the same order.
+// If not called, a time-based seed is used.
+func (b *CHDBuilder) Seed(seed int64) *CHDBuilder {
+	b.userSeed = seed
+	b.seedSetByUser = true
+	return b // Return builder for chaining
 }
 
 // Add a key and value to the hash table.
 func (b *CHDBuilder) Add(key []byte, value []byte) {
 	b.keys = append(b.keys, key)
 	b.values = append(b.values, value)
+}
+
+// BucketRatio sets the ratio of initial hash buckets to the number of keys (m/n).
+// A higher ratio uses more memory for the intermediate bucket index but might
+// reduce the number of collisions during the assignment phase.
+// The ratio must be greater than 0.0. Common values are 0.5 or 1.0.
+// Default: 0.5
+func (b *CHDBuilder) BucketRatio(ratio float64) (*CHDBuilder, error) {
+	if ratio <= 0.0 {
+		return nil, fmt.Errorf("bucket ratio must be greater than 0.0, got %f", ratio)
+	}
+	b.bucketRatio = ratio
+	return b, nil // Return builder for chaining
+}
+
+// RetryLimit sets the maximum number of attempts to find a collision-free
+// secondary hash function ('r' value) for the keys within a single bucket.
+// If this limit is exceeded for any bucket, the build fails.
+// Default: 10,000,000
+func (b *CHDBuilder) RetryLimit(limit int) (*CHDBuilder, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("retry limit must be greater than 0, got %d", limit)
+	}
+	b.retryLimit = limit
+	return b, nil // Return builder for chaining
 }
 
 // Try to find a hash function that does not cause collisions with table, when
@@ -106,7 +145,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 
 	keys := make([][]byte, n)
 	values := make([][]byte, n)
-	hasher := newCHDHasher(n, m, b.seed, b.seeded)
+	hasher := newCHDHasher(n, m, b.userSeed, b.seedSetByUser)
 	buckets := make(bucketVector, m)
 	indices := make([]uint16, m)
 	// An extra check to make sure we don't use an invalid index
@@ -152,7 +191,7 @@ nextBucket:
 		// Keep trying new functions until we get one that does not collide.
 		// The number of retries here is very high to allow a very high
 		// probability of not getting collisions.
-		for i := 0; i < 10000000; i++ {
+		for i := 0; i < b.retryLimit; i++ {
 			if i > collisions {
 				collisions = i
 			}
@@ -165,8 +204,8 @@ nextBucket:
 
 		// Failed to find a hash function with no collisions.
 		return nil, fmt.Errorf(
-			"failed to find a collision-free hash function after ~10000000 attempts, for bucket %d/%d with %d entries: %s",
-			i, len(buckets), len(bucket.keys), &bucket)
+			"failed to find a collision-free hash function after ~%d attempts, for bucket %d/%d with %d entries: %s",
+			b.retryLimit, i, len(buckets), len(bucket.keys), &bucket)
 	}
 
 	// println("max bucket collisions:", collisions)

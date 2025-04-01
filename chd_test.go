@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -119,6 +120,92 @@ func TestCHDSerialization_one(t *testing.T) {
 	cmpDataSlice(t, n, m, n.keys, m.keys)
 	cmpDataSlice(t, n, m, n.values, m.values)
 }
+
+// --- Start of New Phase 1 Tests ---
+
+func TestBuilderParameterDefaults(t *testing.T) {
+	b := Builder()
+	assert.NotNil(t, b)
+	// Check internal fields directly for defaults
+	assert.Equal(t, 0.5, b.bucketRatio, "Default bucketRatio should be 0.5")
+	assert.Equal(t, 10_000_000, b.retryLimit, "Default retryLimit should be 10,000,000")
+	assert.False(t, b.seedSetByUser, "seedSetByUser should be false by default")
+	assert.Zero(t, b.userSeed, "userSeed should be 0 by default")
+}
+
+func TestBuilderSeedSetter(t *testing.T) {
+	b := Builder()
+	seedValue := int64(12345)
+	retBuilder := b.Seed(seedValue)
+
+	assert.Same(t, b, retBuilder, "Seed should return the same builder instance for chaining")
+	assert.True(t, b.seedSetByUser, "seedSetByUser should be true after calling Seed")
+	assert.Equal(t, seedValue, b.userSeed, "userSeed should be set to the provided value")
+}
+
+func TestBuilderSettersValid(t *testing.T) {
+	b := Builder()
+
+	// Test BucketRatio
+	ratio := 1.0
+	retBuilder, err := b.BucketRatio(ratio)
+	require.NoError(t, err, "Setting valid BucketRatio should not error")
+	assert.Same(t, b, retBuilder, "BucketRatio should return the same builder instance")
+	assert.Equal(t, ratio, b.bucketRatio, "bucketRatio should be updated")
+
+	// Test RetryLimit
+	limit := 5000
+	retBuilder, err = b.RetryLimit(limit)
+	require.NoError(t, err, "Setting valid RetryLimit should not error")
+	assert.Same(t, b, retBuilder, "RetryLimit should return the same builder instance")
+	assert.Equal(t, limit, b.retryLimit, "retryLimit should be updated")
+
+	// Test Chaining
+	seedVal := int64(987)
+	limitVal := 9999
+	ratioVal := 0.75
+	b2 := Builder()
+	retBuilder, err = b2.Seed(seedVal).BucketRatio(ratioVal)
+	require.NoError(t, err)
+	retBuilder, err = retBuilder.RetryLimit(limitVal)
+	require.NoError(t, err)
+
+	assert.Same(t, b2, retBuilder, "Chained calls should return the original builder")
+	assert.Equal(t, seedVal, b2.userSeed)
+	assert.True(t, b2.seedSetByUser)
+	assert.Equal(t, ratioVal, b2.bucketRatio)
+	assert.Equal(t, limitVal, b2.retryLimit)
+}
+
+func TestBuilderSettersInvalid(t *testing.T) {
+	b := Builder()
+
+	// Test Invalid BucketRatio
+	_, err := b.BucketRatio(0.0)
+	assert.Error(t, err, "Setting BucketRatio to 0.0 should error")
+	assert.Contains(t, err.Error(), "bucket ratio must be greater than 0.0")
+
+	_, err = b.BucketRatio(-1.5)
+	assert.Error(t, err, "Setting negative BucketRatio should error")
+	assert.Contains(t, err.Error(), "bucket ratio must be greater than 0.0")
+
+	// Ensure original value wasn't changed
+	assert.Equal(t, 0.5, b.bucketRatio, "Invalid BucketRatio should not change the value")
+
+	// Test Invalid RetryLimit
+	_, err = b.RetryLimit(0)
+	assert.Error(t, err, "Setting RetryLimit to 0 should error")
+	assert.Contains(t, err.Error(), "retry limit must be greater than 0")
+
+	_, err = b.RetryLimit(-100)
+	assert.Error(t, err, "Setting negative RetryLimit should error")
+	assert.Contains(t, err.Error(), "retry limit must be greater than 0")
+
+	// Ensure original value wasn't changed
+	assert.Equal(t, 10_000_000, b.retryLimit, "Invalid RetryLimit should not change the value")
+}
+
+// --- End of New Phase 1 Tests ---
 
 func BenchmarkBuiltinMap(b *testing.B) {
 	keys := []string{}
