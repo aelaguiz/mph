@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"reflect" // Added for diagnostics
 	"io"
 	"os"
 	"runtime"
@@ -407,6 +408,12 @@ func TestBuilderSetProgressChan(t *testing.T) {
 
 	assert.Same(t, b, retBuilder, "ProgressChan should return the builder instance")
 	assert.NotNil(t, b.progressChan, "progressChan should be set after calling ProgressChan")
+	
+	// --- DIAGNOSTICS START ---
+	t.Logf("Type of ch: %v, Address: %p", reflect.TypeOf(ch), ch)
+	t.Logf("Type of b.progressChan: %v, Address: %p", reflect.TypeOf(b.progressChan), b.progressChan)
+	// --- DIAGNOSTICS END ---
+	
 	// Use assert.Equal for channels as types might differ (chan T vs chan<- T)
 	assert.Equal(t, ch, b.progressChan, "progressChan should be the one provided")
 
