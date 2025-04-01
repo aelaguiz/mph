@@ -1,13 +1,11 @@
 package mph
 
 import (
-	"bytes"
-	"context" // Added for cancellation
+	"bytes" // Added for cancellation
 	"errors"
 	"fmt"
 	"math/rand"
-	"sort"
-	"sync" // Added for WaitGroup
+	"sort" // Added for WaitGroup
 	"time"
 )
 
@@ -45,10 +43,10 @@ type CHDBuilder struct {
 	values [][]byte
 
 	// User-configurable parameters
-	bucketRatio float64 // Ratio of initial buckets to keys (m/n). Default: 0.5
-	retryLimit  int     // Max attempts to find a collision-free hash for a bucket. Default: 10,000,000
-	userSeed    int64   // Seed provided by the user via Seed().
-	seedSetByUser bool  // Flag indicating if Seed() was called.
+	bucketRatio   float64 // Ratio of initial buckets to keys (m/n). Default: 0.5
+	retryLimit    int     // Max attempts to find a collision-free hash for a bucket. Default: 10,000,000
+	userSeed      int64   // Seed provided by the user via Seed().
+	seedSetByUser bool    // Flag indicating if Seed() was called.
 
 	// Parallel execution control
 	parallelSeedAttempts int // Number of different seeds to try in parallel if the first fails. Default: 1
@@ -220,10 +218,10 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 	// --- Parallel Attempt Path (Phase 6b Logic) ---
 	numAttempts := b.parallelSeedAttempts
 	resultsChan := make(chan buildResult, numAttempts) // Buffered channel for all results
-	
+
 	// Use context for cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel() // Ensure context is cancelled eventually
+	// ctx, cancel := context.WithCancel(context.Background())
+	// defer cancel() // Ensure context is cancelled eventually
 
 	// Generate distinct seeds for each attempt
 	attemptSeeds := make([]int64, numAttempts)
@@ -250,7 +248,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 			attemptID := attemptIdx + 1 // 1-based ID
 
 			chdResult, errResult := b.buildInternal(seed, attemptID)
-			
+
 			// Send result regardless of context cancellation state for now.
 			// The receiver loop will handle ignoring late results.
 			resultsChan <- buildResult{chd: chdResult, err: errResult}
@@ -269,7 +267,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 				// First success!
 				if firstSuccess == nil {
 					firstSuccess = result.chd
-					cancel() // Signal other goroutines to stop (they might not react yet in 6b)
+					// cancel() // Signal other goroutines to stop (they might not react yet in 6b)
 					// Note: We still loop numAttempts times to drain the channel,
 					// but we've captured the first success.
 				}
@@ -280,10 +278,10 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 				lastError = result.err // Keep track of the latest error
 			}
 			// Handle case where result.chd is nil and result.err is nil (shouldn't happen from buildInternal)
-		// Optional: Add a timeout case here if desired using time.After
-		// case <-time.After(someTimeout):
-		//     cancel()
-		//     return nil, errors.New("build timed out")
+			// Optional: Add a timeout case here if desired using time.After
+			// case <-time.After(someTimeout):
+			//     cancel()
+			//     return nil, errors.New("build timed out")
 		}
 	}
 
