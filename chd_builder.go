@@ -221,7 +221,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 	resultsChan := make(chan buildResult, numAttempts) // Buffered channel for all results
 
 	// Use context for cancellation
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	defer cancel() // Ensure context is cancelled eventually
 
 	// Generate distinct seeds for each attempt
