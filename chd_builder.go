@@ -47,6 +47,19 @@ type CHDBuilder struct {
 	retryLimit  int     // Max attempts to find a collision-free hash for a bucket. Default: 10,000,000
 	userSeed    int64   // Seed provided by the user via Seed().
 	seedSetByUser bool  // Flag indicating if Seed() was called.
+
+	// Progress reporting
+	progressChan chan<- BuildProgress // Optional channel for progress updates.
+}
+
+// BuildProgress provides information about the state of the build process.
+type BuildProgress struct {
+	AttemptID               int    // Identifier for the parallel attempt (starts at 1).
+	BucketsProcessed        int    // Number of buckets whose hash functions have been assigned.
+	TotalBuckets            int    // Total number of initial buckets to process.
+	CurrentBucketSize       int    // Number of keys in the bucket currently being processed.
+	CurrentBucketCollisions int    // Number of hash functions tried for the current bucket so far.
+	Stage                   string // Description of the current build stage (e.g., "Sorting Buckets", "Assigning Hashes")
 }
 
 // Create a new CHD hash table builder.
@@ -58,6 +71,7 @@ func Builder() *CHDBuilder {
 		retryLimit:  10_000_000,
 		// userSeed defaults to 0
 		// seedSetByUser defaults to false
+		// progressChan defaults to nil
 	}
 }
 
@@ -99,6 +113,14 @@ func (b *CHDBuilder) RetryLimit(limit int) (*CHDBuilder, error) {
 	}
 	b.retryLimit = limit
 	return b, nil // Return builder for chaining
+}
+
+// ProgressChan sets an optional channel for receiving BuildProgress updates.
+// The channel should be buffered or consumed quickly to avoid blocking the build.
+// If the channel blocks, progress updates will be dropped.
+func (b *CHDBuilder) ProgressChan(ch chan<- BuildProgress) *CHDBuilder {
+	b.progressChan = ch
+	return b // Return builder for chaining
 }
 
 // Try to find a hash function that does not cause collisions with table, when

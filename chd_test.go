@@ -392,6 +392,44 @@ func TestBuildUsesDefaults(t *testing.T) {
 
 // --- End of New Phase 2 Tests ---
 
+// --- Start of New Phase 3 Tests ---
+
+func TestBuilderProgressChanDefaultNil(t *testing.T) {
+	b := Builder()
+	assert.Nil(t, b.progressChan, "Default progressChan should be nil")
+}
+
+func TestBuilderSetProgressChan(t *testing.T) {
+	b := Builder()
+	// Use a buffered channel to avoid blocking in simple test cases
+	ch := make(chan BuildProgress, 1)
+	retBuilder := b.ProgressChan(ch)
+
+	assert.Same(t, b, retBuilder, "ProgressChan should return the builder instance")
+	assert.NotNil(t, b.progressChan, "progressChan should be set")
+	assert.Same(t, ch, b.progressChan, "progressChan should be the one provided")
+
+	// Test setting it back to nil
+	retBuilder = b.ProgressChan(nil)
+	assert.Same(t, b, retBuilder, "ProgressChan should return the builder instance")
+	assert.Nil(t, b.progressChan, "progressChan should be nil after setting to nil")
+}
+
+// TestBuildWithNilProgressChanStillWorks verifies that Build() works correctly
+// when no progress channel is provided (important regression check).
+func TestBuildWithNilProgressChanStillWorks(t *testing.T) {
+	b := Builder().Seed(123) // Use seed for reproducibility
+	// Ensure progressChan is explicitly nil (should be default, but make sure)
+	b.progressChan = nil
+
+	c, err := buildCHDFromSlices(t, sampleKeys, sampleVals, b)
+	require.NoError(t, err, "Build should succeed even if progress channel is nil")
+	require.NotNil(t, c)
+	assert.Equal(t, len(sampleKeys), c.Len())
+}
+
+// --- End of New Phase 3 Tests ---
+
 func BenchmarkBuiltinMap(b *testing.B) {
 	keys := []string{}
 	d := map[string]string{}
