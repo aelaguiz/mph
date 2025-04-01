@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
-	"sync" // Added for WaitGroup
 	"time"
 )
 
@@ -249,6 +248,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 			seed := attemptSeeds[attemptIdx]
 			attemptID := attemptIdx + 1 // 1-based ID
 
+			// In Phase 6c we'll pass ctx to buildInternal
 			chdResult, errResult := b.buildInternal(seed, attemptID)
 
 			// Send result regardless of context cancellation state for now.

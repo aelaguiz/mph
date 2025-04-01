@@ -666,7 +666,6 @@ func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
 	readTimeout := time.After(5 * time.Second) // Safety timeout
 	keepReading := true
 
-readLoop:
 	for keepReading {
 		select {
 		case p, ok := <-progressChan:
