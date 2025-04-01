@@ -589,6 +589,84 @@ func TestBuilderSetParallelAttempts(t *testing.T) {
 
 // --- End of New Phase 5 Tests ---
 
+// --- Start of New Phase 6a Tests ---
+
+// TestBuildParallelBasicSuccess verifies that if at least one attempt succeeds,
+// the build returns a valid CHD.
+func TestBuildParallelBasicSuccess(t *testing.T) {
+	b := Builder().Seed(1) // Use fixed seed for predictability if needed
+	_, err := b.ParallelAttempts(3)
+	require.NoError(t, err)
+	// Default settings should allow success for sampleData
+
+	c, err := buildCHDFromSlices(t, sampleKeys, sampleVals, b)
+	require.NoError(t, err, "Build with parallel attempts failed unexpectedly")
+	require.NotNil(t, c, "Returned CHD should not be nil on success")
+	assert.Equal(t, len(sampleKeys), c.Len())
+
+	// Verify content as a sanity check
+	for i := range sampleKeys {
+		val := c.Get(sampleKeys[i])
+		assert.Equal(t, sampleVals[i], val, "Mismatch for key %s", string(sampleKeys[i]))
+	}
+}
+
+// TestBuildParallelAllFail verifies that if all attempts fail (due to low retry limit),
+// an error is returned.
+func TestBuildParallelAllFail(t *testing.T) {
+	b := Builder().Seed(42) // Use fixed seed
+	_, err := b.ParallelAttempts(3)
+	require.NoError(t, err)
+	_, err = b.RetryLimit(1) // Force failure with extremely low limit
+	require.NoError(t, err)
+
+	// Use a slightly larger dataset where failure is more likely with limit 1
+	testKeys := words[:20]
+	testVals := make([][]byte, len(testKeys))
+	for i := range testKeys { testVals[i] = []byte(fmt.Sprintf("v%d",i)) }
+
+	_, err = buildCHDFromSlices(t, testKeys, testVals, b)
+	require.Error(t, err, "Build should fail when all parallel attempts fail")
+	// Check if the error indicates all attempts failed
+	assert.Contains(t, err.Error(), "all 3 parallel build attempts failed")
+	assert.Contains(t, err.Error(), "failed to find a collision-free hash function after ~1 attempts") // Check cause
+}
+
+// TestBuildParallelProgressMultipleAttempts verifies that progress messages
+// from different attempt IDs are received.
+func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
+	numAttempts := 2
+	// Use a buffered channel large enough
+	progressChan := make(chan BuildProgress, 200) // Larger buffer might be needed
+	b := Builder().Seed(88).ProgressChan(progressChan)
+	_, err := b.ParallelAttempts(numAttempts)
+	require.NoError(t, err)
+
+	// Use sample data
+	_, buildErr := buildCHDFromSlices(t, sampleKeys, sampleVals, b)
+	require.NoError(t, buildErr)
+	close(progressChan) // Close channel to signal completion
+
+	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
+	for p := range progressChan {
+		receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
+	}
+
+	assert.Len(t, receivedProgress, numAttempts, "Should receive progress from %d attempts", numAttempts)
+
+	for i := 1; i <= numAttempts; i++ {
+		require.NotEmpty(t, receivedProgress[i], "Should have progress messages for attempt %d", i)
+		// Check the last message for each attempt
+		lastMsg := receivedProgress[i][len(receivedProgress[i])-1]
+		assert.Equal(t, i, lastMsg.AttemptID)
+		// In phase 6a, both might run to completion
+		assert.Equal(t, "Complete", lastMsg.Stage, "Last stage for attempt %d should be Complete", i)
+		assert.Equal(t, lastMsg.TotalBuckets, lastMsg.BucketsProcessed, "Attempt %d should show all buckets processed", i)
+	}
+}
+
+// --- End of New Phase 6a Tests ---
+
 func BenchmarkBuiltinMap(b *testing.B) {
 	keys := []string{}
 	d := map[string]string{}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
+	"sync" // Added for WaitGroup
 	"time"
 )
 
@@ -192,6 +193,12 @@ func tryHash(hasher *chdHasher, seen map[uint64]bool, keys [][]byte, values [][]
 	return true
 }
 
+// Internal struct to hold results from parallel build attempts
+type buildResult struct {
+	chd *CHD
+	err error
+}
+
 // Build constructs the minimal perfect hash table.
 // It may launch multiple attempts in parallel if ParallelAttempts > 1.
 func (b *CHDBuilder) Build() (*CHD, error) {
@@ -204,7 +211,74 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 		initialSeed = time.Now().UnixNano()
 	}
 
-	return b.buildInternal(initialSeed, 1) // Attempt ID 1
+	// --- Single Attempt Path ---
+	if b.parallelSeedAttempts == 1 {
+		return b.buildInternal(initialSeed, 1) // Attempt ID 1
+	}
+
+	// --- Parallel Attempt Path (Phase 6a Logic) ---
+	numAttempts := b.parallelSeedAttempts
+	resultsChan := make(chan buildResult, numAttempts) // Buffered channel for all results
+	var wg sync.WaitGroup
+
+	// Generate distinct seeds for each attempt
+	attemptSeeds := make([]int64, numAttempts)
+	// Use a local RNG source for generating attempt seeds so it doesn't interfere
+	// with the builder's potential time-based seed or the seeds used *inside* buildInternal.
+	seedGen := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	firstSeed := initialSeed
+	attemptSeeds[0] = firstSeed
+	for i := 1; i < numAttempts; i++ {
+		// Generate random seeds, ensuring they differ from the first one
+		// (duplicates among random seeds are unlikely and acceptable)
+		seed := seedGen.Int63()
+		if b.seedSetByUser && seed == firstSeed { // Avoid reusing user seed if possible
+			seed = seedGen.Int63()
+		}
+		attemptSeeds[i] = seed
+	}
+
+	wg.Add(numAttempts)
+	for i := 0; i < numAttempts; i++ {
+		go func(attemptIdx int) {
+			defer wg.Done()
+			seed := attemptSeeds[attemptIdx]
+			attemptID := attemptIdx + 1 // 1-based ID
+
+			chdResult, errResult := b.buildInternal(seed, attemptID)
+			resultsChan <- buildResult{chd: chdResult, err: errResult}
+
+		}(i)
+	}
+
+	// Wait for all attempts to complete
+	wg.Wait()
+	close(resultsChan) // Close channel now that all goroutines are done sending
+
+	// Collect results and find the first success or last error
+	var firstSuccess *CHD
+	var lastError error
+	for result := range resultsChan {
+		if result.err == nil && result.chd != nil && firstSuccess == nil {
+			firstSuccess = result.chd // Found the first success
+		}
+		if result.err != nil {
+			lastError = result.err // Keep track of the latest error encountered
+		}
+	}
+
+	if firstSuccess != nil {
+		return firstSuccess, nil // Return the first successful result found
+	}
+
+	// If no success was found
+	if lastError != nil {
+		return nil, fmt.Errorf("all %d parallel build attempts failed, last error: %w", numAttempts, lastError)
+	}
+
+	// Should be rare: no success and no error (e.g., empty input?)
+	return nil, errors.New("all parallel build attempts completed without success or error")
 }
 
 // buildInternal performs a single attempt to build the CHD table using a specific seed.
