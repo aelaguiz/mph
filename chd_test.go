@@ -547,6 +547,48 @@ func TestBuildProgressNonBlockingSend(t *testing.T) {
 
 // --- End of New Phase 4 Tests ---
 
+// --- Start of New Phase 5 Tests ---
+
+func TestBuilderParallelAttemptsDefault(t *testing.T) {
+	b := Builder()
+	assert.Equal(t, 1, b.parallelSeedAttempts, "Default parallelSeedAttempts should be 1")
+}
+
+func TestBuilderSetParallelAttempts(t *testing.T) {
+	b := Builder()
+
+	// Valid attempt
+	_, err := b.ParallelAttempts(3)
+	require.NoError(t, err, "Setting valid ParallelAttempts should not error")
+	assert.Equal(t, 3, b.parallelSeedAttempts, "parallelSeedAttempts should be updated")
+
+	// Chain attempt
+	retBuilder, err := b.ParallelAttempts(5)
+	require.NoError(t, err)
+	assert.Same(t, b, retBuilder, "ParallelAttempts should return builder instance for chaining")
+	assert.Equal(t, 5, b.parallelSeedAttempts, "parallelSeedAttempts should be updated after chaining")
+
+	// Invalid attempts
+	_, err = b.ParallelAttempts(0)
+	assert.Error(t, err, "Setting ParallelAttempts to 0 should error")
+	assert.Contains(t, err.Error(), "must be at least 1")
+	assert.Equal(t, 5, b.parallelSeedAttempts, "Value should not change after invalid attempt") // Check it wasn't changed
+
+	_, err = b.ParallelAttempts(-1)
+	assert.Error(t, err, "Setting ParallelAttempts to -1 should error")
+	assert.Contains(t, err.Error(), "must be at least 1")
+	assert.Equal(t, 5, b.parallelSeedAttempts, "Value should not change after invalid attempt") // Check it wasn't changed
+}
+
+// --- IMPORTANT: Regression Testing ---
+// We rely on the fact that ALL previous tests (Phase 1-4) are run and pass
+// after this refactoring. This implicitly tests that the refactored
+// buildInternal function and the public Build (calling buildInternal once)
+// still produce the correct results and behavior for the single-threaded case.
+// No *new* tests specifically for the refactoring are needed if the old ones pass.
+
+// --- End of New Phase 5 Tests ---
+
 func BenchmarkBuiltinMap(b *testing.B) {
 	keys := []string{}
 	d := map[string]string{}

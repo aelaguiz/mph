@@ -48,6 +48,9 @@ type CHDBuilder struct {
 	userSeed    int64   // Seed provided by the user via Seed().
 	seedSetByUser bool  // Flag indicating if Seed() was called.
 
+	// Parallel execution control
+	parallelSeedAttempts int // Number of different seeds to try in parallel if the first fails. Default: 1
+
 	// Progress reporting
 	progressChan chan<- BuildProgress // Optional channel for progress updates.
 }
@@ -71,6 +74,7 @@ func Builder() *CHDBuilder {
 		retryLimit:  10_000_000,
 		// userSeed defaults to 0
 		// seedSetByUser defaults to false
+		parallelSeedAttempts: 1, // Default to single attempt
 		// progressChan defaults to nil
 	}
 }
@@ -115,19 +119,32 @@ func (b *CHDBuilder) RetryLimit(limit int) (*CHDBuilder, error) {
 	return b, nil // Return builder for chaining
 }
 
+// ParallelAttempts sets the number of different random seeds the builder
+// should attempt in parallel during the Build() process.
+// If set > 1, Build() will launch multiple concurrent build attempts. The first
+// one to succeed returns its result, and the others are cancelled.
+// Default: 1 (single attempt). Must be >= 1.
+func (b *CHDBuilder) ParallelAttempts(n int) (*CHDBuilder, error) {
+	if n < 1 {
+		return nil, fmt.Errorf("parallel attempts must be at least 1, got %d", n)
+	}
+	b.parallelSeedAttempts = n
+	return b, nil
+}
+
 // ProgressChan sets an optional channel for receiving BuildProgress updates.
 // The channel should be buffered or consumed quickly to avoid blocking the build.
-// If the channel blocks, progress updates will be dropped.
 func (b *CHDBuilder) ProgressChan(ch chan<- BuildProgress) *CHDBuilder {
 	b.progressChan = ch
 	return b // Return builder for chaining
 }
 
 // sendProgress sends a progress update non-blockingly if the channel is configured.
-func (b *CHDBuilder) sendProgress(progress BuildProgress) {
-	// Ensure AttemptID is at least 1 for single-threaded builds
+// It uses the provided attemptID in the progress update.
+func (b *CHDBuilder) sendProgress(progress BuildProgress, attemptID int) {
+	// Ensure AttemptID is set correctly
 	if progress.AttemptID == 0 {
-		progress.AttemptID = 1
+		progress.AttemptID = attemptID
 	}
 
 	if b.progressChan != nil {
@@ -175,12 +192,26 @@ func tryHash(hasher *chdHasher, seen map[uint64]bool, keys [][]byte, values [][]
 	return true
 }
 
+// Build constructs the minimal perfect hash table.
+// It may launch multiple attempts in parallel if ParallelAttempts > 1.
 func (b *CHDBuilder) Build() (*CHD, error) {
+	// Phase 5: Just call the internal build function once.
+	// Phase 6 will add the parallel logic here.
+
+	// Determine the initial seed for the first (and currently only) attempt
+	initialSeed := b.userSeed
+	if !b.seedSetByUser {
+		initialSeed = time.Now().UnixNano()
+	}
+
+	return b.buildInternal(initialSeed, 1) // Attempt ID 1
+}
+
+// buildInternal performs a single attempt to build the CHD table using a specific seed.
+func (b *CHDBuilder) buildInternal(buildSeed int64, attemptID int) (*CHD, error) {
 	n := uint64(len(b.keys))
-	// Calculate m (number of buckets) using the configured bucketRatio
 	mFloat := float64(n) * b.bucketRatio
 	m := uint64(mFloat)
-	// Ensure at least one bucket, especially if n=0 or ratio is very small
 	if m == 0 {
 		m = 1
 	}
@@ -188,13 +219,14 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 
 	keys := make([][]byte, n)
 	values := make([][]byte, n)
-	hasher := newCHDHasher(n, m, b.userSeed, b.seedSetByUser)
+	// Use the specific seed provided for this attempt
+	hasher := newCHDHasher(n, m, buildSeed, true) // Treat the provided seed as explicitly set for this attempt
 	buckets := make(bucketVector, m)
 
 	b.sendProgress(BuildProgress{
 		TotalBuckets: totalBuckets,
 		Stage:        "Hashing Keys",
-	})
+	}, attemptID)
 
 	// --- Hashing Keys Stage ---
 	indices := make([]uint16, m)
@@ -225,7 +257,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 	b.sendProgress(BuildProgress{
 		TotalBuckets: totalBuckets,
 		Stage:        "Sorting Buckets",
-	})
+	}, attemptID)
 
 	// --- Sorting Buckets Stage ---
 	// Order buckets by size (retaining the hash index)
@@ -237,7 +269,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 	b.sendProgress(BuildProgress{
 		TotalBuckets: totalBuckets,
 		Stage:        "Assigning Hashes",
-	})
+	}, attemptID)
 
 nextBucket:
 	for i, bucket := range buckets {
@@ -250,7 +282,7 @@ nextBucket:
 			TotalBuckets:      totalBuckets,
 			CurrentBucketSize: len(bucket.keys),
 			Stage:             "Assigning Hashes",
-		})
+		}, attemptID)
 
 		// Check existing hash functions.
 		for ri, r := range hasher.r {
@@ -269,7 +301,7 @@ nextBucket:
 				CurrentBucketSize:       len(bucket.keys),
 				CurrentBucketCollisions: coll + 1, // Report attempts (1-based)
 				Stage:                   "Assigning Hashes",
-			})
+			}, attemptID)
 
 			if coll > collisions {
 				collisions = coll
@@ -295,7 +327,7 @@ nextBucket:
 		BucketsProcessed: totalBuckets, // All buckets processed
 		TotalBuckets:     totalBuckets,
 		Stage:            "Packing Data",
-	})
+	}, attemptID)
 
 	keylist := make([]dataSlice, len(b.keys))
 	valuelist := make([]dataSlice, len(b.values))
@@ -313,7 +345,7 @@ nextBucket:
 		BucketsProcessed: totalBuckets,
 		TotalBuckets:     totalBuckets,
 		Stage:            "Complete", // Final status
-	})
+	}, attemptID)
 
 	return &CHD{
 		r:       hasher.r,
