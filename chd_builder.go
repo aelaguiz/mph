@@ -59,7 +59,7 @@ type BuildProgress struct {
 	TotalBuckets            int    // Total number of initial buckets to process.
 	CurrentBucketSize       int    // Number of keys in the bucket currently being processed.
 	CurrentBucketCollisions int    // Number of hash functions tried for the current bucket so far.
-	Stage                   string // Description of the current build stage (e.g., "Sorting Buckets", "Assigning Hashes")
+	Stage                   string // Description of the current build stage (e.g., "Hashing Keys", "Sorting Buckets", "Assigning Hashes")
 }
 
 // Create a new CHD hash table builder.
@@ -123,6 +123,23 @@ func (b *CHDBuilder) ProgressChan(ch chan<- BuildProgress) *CHDBuilder {
 	return b // Return builder for chaining
 }
 
+// sendProgress sends a progress update non-blockingly if the channel is configured.
+func (b *CHDBuilder) sendProgress(progress BuildProgress) {
+	// Ensure AttemptID is at least 1 for single-threaded builds
+	if progress.AttemptID == 0 {
+		progress.AttemptID = 1
+	}
+
+	if b.progressChan != nil {
+		select {
+		case b.progressChan <- progress:
+			// Sent successfully
+		default:
+			// Channel buffer is full or receiver is not ready; drop progress update.
+		}
+	}
+}
+
 // Try to find a hash function that does not cause collisions with table, when
 // applied to the keys in the bucket.
 func tryHash(hasher *chdHasher, seen map[uint64]bool, keys [][]byte, values [][]byte, indices []uint16, bucket *bucket, ri uint16, r uint64) bool {
@@ -167,11 +184,19 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 	if m == 0 {
 		m = 1
 	}
+	totalBuckets := int(m) // Store for progress reporting
 
 	keys := make([][]byte, n)
 	values := make([][]byte, n)
 	hasher := newCHDHasher(n, m, b.userSeed, b.seedSetByUser)
 	buckets := make(bucketVector, m)
+
+	b.sendProgress(BuildProgress{
+		TotalBuckets: totalBuckets,
+		Stage:        "Hashing Keys",
+	})
+
+	// --- Hashing Keys Stage ---
 	indices := make([]uint16, m)
 	// An extra check to make sure we don't use an invalid index
 	for i := range indices {
@@ -197,14 +222,35 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 		buckets[oh].values = append(buckets[oh].values, value)
 	}
 
+	b.sendProgress(BuildProgress{
+		TotalBuckets: totalBuckets,
+		Stage:        "Sorting Buckets",
+	})
+
+	// --- Sorting Buckets Stage ---
 	// Order buckets by size (retaining the hash index)
 	collisions := 0
 	sort.Sort(buckets)
+
+	// --- Assigning Hashes Stage ---
+	// Send initial assignment state
+	b.sendProgress(BuildProgress{
+		TotalBuckets: totalBuckets,
+		Stage:        "Assigning Hashes",
+	})
+
 nextBucket:
 	for i, bucket := range buckets {
 		if len(bucket.keys) == 0 {
 			continue
 		}
+
+		b.sendProgress(BuildProgress{
+			BucketsProcessed:  i, // Report progress *before* processing bucket i
+			TotalBuckets:      totalBuckets,
+			CurrentBucketSize: len(bucket.keys),
+			Stage:             "Assigning Hashes",
+		})
 
 		// Check existing hash functions.
 		for ri, r := range hasher.r {
@@ -216,9 +262,17 @@ nextBucket:
 		// Keep trying new functions until we get one that does not collide.
 		// The number of retries here is very high to allow a very high
 		// probability of not getting collisions.
-		for i := 0; i < b.retryLimit; i++ {
-			if i > collisions {
-				collisions = i
+		for coll := 0; coll < b.retryLimit; coll++ {
+			b.sendProgress(BuildProgress{
+				BucketsProcessed:        i,
+				TotalBuckets:            totalBuckets,
+				CurrentBucketSize:       len(bucket.keys),
+				CurrentBucketCollisions: coll + 1, // Report attempts (1-based)
+				Stage:                   "Assigning Hashes",
+			})
+
+			if coll > collisions {
+				collisions = coll
 			}
 			ri, r := hasher.Generate()
 			if tryHash(hasher, seen, keys, values, indices, &bucket, ri, r) {
@@ -230,12 +284,18 @@ nextBucket:
 		// Failed to find a hash function with no collisions.
 		return nil, fmt.Errorf(
 			"failed to find a collision-free hash function after ~%d attempts, for bucket %d/%d with %d entries: %s",
-			b.retryLimit, i, len(buckets), len(bucket.keys), &bucket)
+			b.retryLimit, i, totalBuckets, len(bucket.keys), &bucket)
 	}
 
 	// println("max bucket collisions:", collisions)
 	// println("keys:", len(table))
 	// println("hash functions:", len(hasher.r))
+
+	b.sendProgress(BuildProgress{
+		BucketsProcessed: totalBuckets, // All buckets processed
+		TotalBuckets:     totalBuckets,
+		Stage:            "Packing Data",
+	})
 
 	keylist := make([]dataSlice, len(b.keys))
 	valuelist := make([]dataSlice, len(b.values))
@@ -248,6 +308,12 @@ nextBucket:
 		buf.Write(values[i])
 		valuelist[i].end = uint64(buf.Len())
 	}
+
+	b.sendProgress(BuildProgress{
+		BucketsProcessed: totalBuckets,
+		TotalBuckets:     totalBuckets,
+		Stage:            "Complete", // Final status
+	})
 
 	return &CHD{
 		r:       hasher.r,

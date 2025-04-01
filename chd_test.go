@@ -8,7 +8,9 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"sync" // Added for non-blocking test
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -439,6 +441,111 @@ func TestBuildWithNilProgressChanStillWorks(t *testing.T) {
 }
 
 // --- End of New Phase 3 Tests ---
+
+// --- Start of New Phase 4 Tests ---
+
+func TestBuildSendsProgress(t *testing.T) {
+	// Use a buffered channel large enough to hold all expected messages
+	// for a small build without blocking.
+	progressChan := make(chan BuildProgress, 100) // Adjust size if needed
+	b := Builder().Seed(42).ProgressChan(progressChan)
+
+	// Use sample data which is small and predictable
+	c, err := buildCHDFromSlices(t, sampleKeys, sampleVals, b)
+	require.NoError(t, err, "Build failed")
+	require.NotNil(t, c)
+	close(progressChan) // Close channel to signal completion for range loop
+
+	var receivedProgress []BuildProgress
+	for p := range progressChan {
+		receivedProgress = append(receivedProgress, p)
+	}
+
+	require.Greater(t, len(receivedProgress), 2, "Should receive at least a few progress updates")
+
+	// Check first message (Hashing Keys or similar)
+	assert.Equal(t, 1, receivedProgress[0].AttemptID, "AttemptID should be 1")
+	assert.NotEmpty(t, receivedProgress[0].Stage, "First stage should be set")
+	assert.Greater(t, receivedProgress[0].TotalBuckets, 0, "TotalBuckets should be positive")
+
+	// Check last message (Complete)
+	lastProgress := receivedProgress[len(receivedProgress)-1]
+	assert.Equal(t, 1, lastProgress.AttemptID, "Last AttemptID should be 1")
+	assert.Equal(t, "Complete", lastProgress.Stage, "Last stage should be 'Complete'")
+	assert.Equal(t, lastProgress.TotalBuckets, lastProgress.BucketsProcessed, "Last progress should show all buckets processed")
+
+	// Check intermediate messages (Assigning Hashes)
+	foundAssigning := false
+	for _, p := range receivedProgress {
+		assert.Equal(t, 1, p.AttemptID) // Ensure all have AttemptID 1
+		if p.Stage == "Assigning Hashes" {
+			foundAssigning = true
+			assert.GreaterOrEqual(t, p.BucketsProcessed, 0)
+			assert.LessOrEqual(t, p.BucketsProcessed, p.TotalBuckets)
+			assert.GreaterOrEqual(t, p.CurrentBucketSize, 0)
+			assert.GreaterOrEqual(t, p.CurrentBucketCollisions, 0)
+		}
+	}
+	assert.True(t, foundAssigning, "Should have received 'Assigning Hashes' stage updates")
+}
+
+func TestBuildProgressNonBlockingSend(t *testing.T) {
+	// Use an *unbuffered* channel to force blocking if not handled correctly
+	progressChan := make(chan BuildProgress)
+	b := Builder().Seed(99).ProgressChan(progressChan)
+
+	// Use a slightly larger dataset to ensure multiple progress updates are attempted
+	keys := words[:30]
+	vals := make([][]byte, len(keys))
+	for i := range keys { vals[i] = keys[i] }
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var buildErr error
+	var c *CHD
+
+	// Run build in a goroutine
+	go func() {
+		defer wg.Done()
+		c, buildErr = buildCHDFromSlices(t, keys, vals, b)
+	}()
+
+	// Only read the *first* progress message (or none if build is super fast)
+	// Then let the channel block potential future sends.
+	readDone := make(chan bool)
+	go func(){
+		select {
+		case <-progressChan:
+			// Successfully read one message
+			t.Log("Successfully read one progress message")
+		case <-time.After(2 * time.Second):
+			// Didn't receive a message quickly, maybe build finished?
+			t.Log("Timed out waiting for first progress message")
+		}
+		close(readDone)
+	}()
+
+	<- readDone // Wait until we have attempted to read one message
+
+	// Wait for the build goroutine to finish
+	buildFinishChan := make(chan bool)
+	go func(){
+		wg.Wait()
+		close(buildFinishChan)
+	}()
+
+	// Check if the build finishes within a reasonable time, indicating it didn't deadlock
+	select {
+	case <-buildFinishChan:
+		// Build finished successfully (or with an error, which is still not a deadlock)
+		assert.NoError(t, buildErr, "Build should complete without error even if progress chan wasn't fully consumed")
+		require.NotNil(t, c)
+	case <-time.After(10 * time.Second): // Generous timeout
+		t.Fatal("Build process deadlocked or took too long, likely blocked on progress channel send")
+	}
+}
+
+// --- End of New Phase 4 Tests ---
 
 func BenchmarkBuiltinMap(b *testing.B) {
 	keys := []string{}
