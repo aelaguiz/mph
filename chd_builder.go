@@ -1,11 +1,13 @@
 package mph
 
 import (
-	"bytes" // Added for cancellation
+	"bytes"
+	"context" // Added for cancellation
 	"errors"
 	"fmt"
 	"math/rand"
-	"sort" // Added for WaitGroup
+	"sort"
+	"sync" // Added for WaitGroup
 	"time"
 )
 
@@ -220,8 +222,8 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 	resultsChan := make(chan buildResult, numAttempts) // Buffered channel for all results
 
 	// Use context for cancellation
-	// ctx, cancel := context.WithCancel(context.Background())
-	// defer cancel() // Ensure context is cancelled eventually
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Ensure context is cancelled eventually
 
 	// Generate distinct seeds for each attempt
 	attemptSeeds := make([]int64, numAttempts)
@@ -267,7 +269,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 				// First success!
 				if firstSuccess == nil {
 					firstSuccess = result.chd
-					// cancel() // Signal other goroutines to stop (they might not react yet in 6b)
+					cancel() // Signal other goroutines to stop (they might not react yet in 6b)
 					// Note: We still loop numAttempts times to drain the channel,
 					// but we've captured the first success.
 				}

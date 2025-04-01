@@ -653,26 +653,79 @@ func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
 		vals[i] = []byte(fmt.Sprintf("val%d", i))
 	}
 
-	_, buildErr := buildCHDFromSlices(t, keys, vals, b)
-	require.NoError(t, buildErr)
-	// It's tricky to reliably close the channel now, as we return on first success.
-	// Instead, wait briefly for messages to flush.
-	time.Sleep(100 * time.Millisecond) // Allow time for messages to arrive
-	close(progressChan)                // Close it now
+	buildDone := make(chan struct{})
+	var buildErr error
+	go func() {
+		_, buildErr = buildCHDFromSlices(t, keys, vals, b)
+		close(buildDone)
+	}()
 
+	// Read progress messages until build is done OR we see a "Complete" stage
+	// Use a timeout to prevent hanging if "Complete" is somehow missed.
 	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
-	var firstSuccessfulAttemptID int = -1
-	var maxProcessedPerAttempt = make(map[int]int)
+	readTimeout := time.After(5 * time.Second) // Safety timeout
+	keepReading := true
 
-	for p := range progressChan {
-		receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
-		if p.Stage == "Complete" && firstSuccessfulAttemptID == -1 {
-			firstSuccessfulAttemptID = p.AttemptID
-		}
-		if p.BucketsProcessed > maxProcessedPerAttempt[p.AttemptID] {
-			maxProcessedPerAttempt[p.AttemptID] = p.BucketsProcessed
+readLoop:
+	for keepReading {
+		select {
+		case p, ok := <-progressChan:
+			if !ok {
+				keepReading = false // Channel closed
+				break
+			}
+			receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
+			if p.Stage == "Complete" {
+				// We saw a complete message, assume others will flush soon or are irrelevant
+				// Stop actively reading after a short grace period
+				go func() {
+					time.Sleep(50 * time.Millisecond)
+					// Signal to stop reading (might need a channel if concurrent reads happen)
+					// For simplicity here, just stop the outer loop assumption
+					// This isn't perfectly robust but better than fixed sleep.
+					// A better approach might involve signaling from the build goroutine completion.
+				}()
+				// For now, let's just break the select and let the outer loop finish naturally
+				// when the channel is closed by the sender eventually (or timeout hits)
+			}
+		case <-buildDone:
+			// Build finished, try reading remaining messages briefly
+			keepReading = false
+			// Drain remaining messages for a short period
+			drainTimeout := time.After(100 * time.Millisecond)
+		drainLoop:
+			for {
+				select {
+				case p, ok := <-progressChan:
+					if !ok { break drainLoop } // Channel closed
+					receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
+				case <-drainTimeout:
+					break drainLoop
+				}
+			}
+		case <-readTimeout:
+			t.Log("Read progress timeout hit")
+			keepReading = false // Stop reading on timeout
 		}
 	}
+
+	// Now analyze the collected messages
+	firstSuccessfulAttemptID := -1 // Reset before analysis
+	maxProcessedPerAttempt := make(map[int]int) // Reset before analysis
+	
+	// Find the actual first success ID from the collected messages
+	for id, msgs := range receivedProgress {
+		for _, p := range msgs {
+			if p.Stage == "Complete" && firstSuccessfulAttemptID == -1 {
+				firstSuccessfulAttemptID = p.AttemptID
+			}
+			if p.BucketsProcessed > maxProcessedPerAttempt[id] {
+				maxProcessedPerAttempt[id] = p.BucketsProcessed
+			}
+		}
+	}
+	
+	require.NoError(t, buildErr) // Verify build succeeded
 
 	assert.NotEmpty(t, receivedProgress, "Should receive some progress messages")
 	assert.NotEqual(t, -1, firstSuccessfulAttemptID, "At least one attempt should have completed successfully")
