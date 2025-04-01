@@ -213,7 +213,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 
 	// --- Single Attempt Path ---
 	if b.parallelSeedAttempts == 1 {
-		return b.buildInternal(initialSeed, 1) // Attempt ID 1
+		return b.buildInternal(context.Background(), initialSeed, 1) // Attempt ID 1
 	}
 
 	// --- Parallel Attempt Path (Phase 6b Logic) ---
@@ -221,7 +221,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 	resultsChan := make(chan buildResult, numAttempts) // Buffered channel for all results
 
 	// Use context for cancellation
-	_, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel() // Ensure context is cancelled eventually
 
 	// Generate distinct seeds for each attempt
@@ -249,7 +249,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 			attemptID := attemptIdx + 1 // 1-based ID
 
 			// Pass the context to the internal build function
-			chdResult, errResult := b.buildInternal(ctx, seed, attemptID)
+			chdResult, errResult := b.buildInternal(context.Background(), seed, attemptID)
 
 			// Send result regardless of context cancellation state for now.
 			// The receiver loop will handle ignoring late results.
