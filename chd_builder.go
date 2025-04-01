@@ -2,6 +2,7 @@ package mph
 
 import (
 	"bytes"
+	"context" // Added for cancellation
 	"errors"
 	"fmt"
 	"math/rand"
@@ -216,10 +217,13 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 		return b.buildInternal(initialSeed, 1) // Attempt ID 1
 	}
 
-	// --- Parallel Attempt Path (Phase 6a Logic) ---
+	// --- Parallel Attempt Path (Phase 6b Logic) ---
 	numAttempts := b.parallelSeedAttempts
 	resultsChan := make(chan buildResult, numAttempts) // Buffered channel for all results
-	var wg sync.WaitGroup
+	
+	// Use context for cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Ensure context is cancelled eventually
 
 	// Generate distinct seeds for each attempt
 	attemptSeeds := make([]int64, numAttempts)
@@ -239,37 +243,52 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 		attemptSeeds[i] = seed
 	}
 
-	wg.Add(numAttempts)
+	// Launch goroutines
 	for i := 0; i < numAttempts; i++ {
 		go func(attemptIdx int) {
-			defer wg.Done()
 			seed := attemptSeeds[attemptIdx]
 			attemptID := attemptIdx + 1 // 1-based ID
 
 			chdResult, errResult := b.buildInternal(seed, attemptID)
+			
+			// Send result regardless of context cancellation state for now.
+			// The receiver loop will handle ignoring late results.
 			resultsChan <- buildResult{chd: chdResult, err: errResult}
-
 		}(i)
 	}
 
-	// Wait for all attempts to complete
-	wg.Wait()
-	close(resultsChan) // Close channel now that all goroutines are done sending
-
-	// Collect results and find the first success or last error
+	// Wait for the first success or all errors
 	var firstSuccess *CHD
 	var lastError error
-	for result := range resultsChan {
-		if result.err == nil && result.chd != nil && firstSuccess == nil {
-			firstSuccess = result.chd // Found the first success
-		}
-		if result.err != nil {
-			lastError = result.err // Keep track of the latest error encountered
+	errorCount := 0
+
+	for i := 0; i < numAttempts; i++ { // Loop exactly numAttempts times to collect all results
+		select {
+		case result := <-resultsChan:
+			if result.err == nil && result.chd != nil {
+				// First success!
+				if firstSuccess == nil {
+					firstSuccess = result.chd
+					cancel() // Signal other goroutines to stop (they might not react yet in 6b)
+					// Note: We still loop numAttempts times to drain the channel,
+					// but we've captured the first success.
+				}
+				// Ignore subsequent successes
+			} else if result.err != nil {
+				// Received an error
+				errorCount++
+				lastError = result.err // Keep track of the latest error
+			}
+			// Handle case where result.chd is nil and result.err is nil (shouldn't happen from buildInternal)
+		// Optional: Add a timeout case here if desired using time.After
+		// case <-time.After(someTimeout):
+		//     cancel()
+		//     return nil, errors.New("build timed out")
 		}
 	}
 
 	if firstSuccess != nil {
-		return firstSuccess, nil // Return the first successful result found
+		return firstSuccess, nil // Return the first success we found
 	}
 
 	// If no success was found

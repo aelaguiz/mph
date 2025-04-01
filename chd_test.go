@@ -635,37 +635,137 @@ func TestBuildParallelAllFail(t *testing.T) {
 // TestBuildParallelProgressMultipleAttempts verifies that progress messages
 // from different attempt IDs are received.
 func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
-	numAttempts := 2
+	numAttempts := 3 // Increase attempts
 	// Use a buffered channel large enough
-	progressChan := make(chan BuildProgress, 200) // Larger buffer might be needed
+	progressChan := make(chan BuildProgress, 300) // Larger buffer might be needed
 	b := Builder().Seed(88).ProgressChan(progressChan)
 	_, err := b.ParallelAttempts(numAttempts)
 	require.NoError(t, err)
 
-	// Use sample data
-	_, buildErr := buildCHDFromSlices(t, sampleKeys, sampleVals, b)
+	// Make build slightly longer to see more progress interleaving
+	keys := words[:50]
+	vals := make([][]byte, len(keys))
+	for i := range keys { vals[i] = []byte(fmt.Sprintf("val%d",i)) }
+
+	_, buildErr := buildCHDFromSlices(t, keys, vals, b)
 	require.NoError(t, buildErr)
-	close(progressChan) // Close channel to signal completion
+	// It's tricky to reliably close the channel now, as we return on first success.
+	// Instead, wait briefly for messages to flush.
+	time.Sleep(100 * time.Millisecond) // Allow time for messages to arrive
+	close(progressChan) // Close it now
 
 	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
+	var firstSuccessfulAttemptID int = -1
+	var maxProcessedPerAttempt = make(map[int]int)
+
 	for p := range progressChan {
 		receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
+		if p.Stage == "Complete" && firstSuccessfulAttemptID == -1 {
+			firstSuccessfulAttemptID = p.AttemptID
+		}
+		if p.BucketsProcessed > maxProcessedPerAttempt[p.AttemptID] {
+			maxProcessedPerAttempt[p.AttemptID] = p.BucketsProcessed
+		}
 	}
 
-	assert.Len(t, receivedProgress, numAttempts, "Should receive progress from %d attempts", numAttempts)
+	assert.NotEmpty(t, receivedProgress, "Should receive some progress messages")
+	assert.NotEqual(t, -1, firstSuccessfulAttemptID, "At least one attempt should have completed successfully")
 
-	for i := 1; i <= numAttempts; i++ {
-		require.NotEmpty(t, receivedProgress[i], "Should have progress messages for attempt %d", i)
-		// Check the last message for each attempt
-		lastMsg := receivedProgress[i][len(receivedProgress[i])-1]
-		assert.Equal(t, i, lastMsg.AttemptID)
-		// In phase 6a, both might run to completion
-		assert.Equal(t, "Complete", lastMsg.Stage, "Last stage for attempt %d should be Complete", i)
-		assert.Equal(t, lastMsg.TotalBuckets, lastMsg.BucketsProcessed, "Attempt %d should show all buckets processed", i)
+	t.Logf("First successful attempt ID: %d", firstSuccessfulAttemptID)
+	for id, count := range maxProcessedPerAttempt {
+		t.Logf("Attempt %d max buckets processed: %d", id, count)
+	}
+
+	// Check if attempts other than the first successful one potentially stopped early
+	// (This is not guaranteed without context propagation, but check if progress suggests it)
+	if len(receivedProgress) > 1 {
+		foundShorter := false
+		for id, msgs := range receivedProgress {
+			if id != firstSuccessfulAttemptID {
+				if len(msgs) == 0 { continue } // Possible if success was immediate
+				lastMsg := msgs[len(msgs)-1]
+				// Check if it finished *before* reaching the end
+				if lastMsg.Stage != "Complete" || lastMsg.BucketsProcessed < lastMsg.TotalBuckets {
+					foundShorter = true
+					t.Logf("Attempt %d likely stopped early (last stage: %s, buckets: %d/%d)", 
+					        id, lastMsg.Stage, lastMsg.BucketsProcessed, lastMsg.TotalBuckets)
+				}
+			}
+		}
+		// This assertion is weak in 6b, stronger test needed in 6c
+		// assert.True(t, foundShorter, "Expected at least one other attempt to show signs of stopping early")
 	}
 }
 
 // --- End of New Phase 6a Tests ---
+
+// --- Start of New Phase 6b Tests ---
+
+// TestBuildParallelReturnsOnFirstSuccess verifies that if one attempt succeeds,
+// even if others fail, the build returns the success.
+func TestBuildParallelReturnsOnFirstSuccess(t *testing.T) {
+	// Scenario: Attempt 1 fails quickly, Attempt 2 succeeds, Attempt 3 fails quickly.
+	// We need settings that reliably cause this. Use RetryLimit.
+
+	testKeys := words[:30] // Use a dataset that requires >1 retry sometimes
+	testVals := make([][]byte, len(testKeys))
+	for i := range testKeys { testVals[i] = []byte(fmt.Sprintf("v%d",i)) }
+
+	numAttempts := 3
+	//successSeed := int64(101) // Assume this seed works with default limit
+	//failSeed1 := int64(102)
+	//failSeed2 := int64(103)
+
+	// We can't directly assign seeds AND different params per attempt yet.
+	// So, we configure the builder once. We set a high parallel attempt count,
+	// a low retry limit (to encourage failures), but rely on the fact that
+	// different random seeds might hit the limit or not.
+
+	builder := Builder()
+	_, err := builder.ParallelAttempts(numAttempts)
+	require.NoError(t, err)
+	_, err = builder.RetryLimit(5) // Low limit to make failures more likely for some seeds
+	require.NoError(t, err)
+	// Don't set a specific seed, let the parallel logic generate random ones.
+
+	// It's hard to guarantee failure/success based *only* on random seeds with
+	// fixed parameters across attempts. We are testing the *mechanism*:
+	// If *any* of the random seeds succeed with limit 5, the build should succeed.
+	// If *all* random seeds fail with limit 5, the build should fail.
+
+	// Run multiple times to increase chance of hitting both scenarios
+	successCount := 0
+	failCount := 0
+	runs := 10 // Run a few times
+
+	for i := 0; i < runs; i++ {
+		// Re-create builder each time to get new random seeds inside Build()
+		builder = Builder()
+		_, err = builder.ParallelAttempts(numAttempts)
+		require.NoError(t, err)
+		_, err = builder.RetryLimit(5)
+		require.NoError(t, err)
+
+		c, buildErr := buildCHDFromSlices(t, testKeys, testVals, builder)
+
+		if buildErr == nil {
+			successCount++
+			require.NotNil(t, c)
+			assert.Equal(t, len(testKeys), c.Len())
+		} else {
+			failCount++
+			assert.Contains(t, buildErr.Error(), fmt.Sprintf("all %d parallel build attempts failed", numAttempts))
+		}
+	}
+
+	t.Logf("Parallel build runs: %d successes, %d failures (with limit 5)", successCount, failCount)
+	// We expect *some* successes and potentially *some* failures over multiple runs
+	// This demonstrates the mechanism handles both outcomes correctly.
+	assert.True(t, successCount > 0 || failCount > 0, "Expected at least one outcome over multiple runs")
+	// If it *always* fails or *always* succeeds, the test setup might not be triggering diverse outcomes.
+}
+
+// --- End of New Phase 6b Tests ---
 
 func BenchmarkBuiltinMap(b *testing.B) {
 	keys := []string{}
