@@ -248,8 +248,8 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 			seed := attemptSeeds[attemptIdx]
 			attemptID := attemptIdx + 1 // 1-based ID
 
-			// In Phase 6c we'll pass ctx to buildInternal
-			chdResult, errResult := b.buildInternal(seed, attemptID)
+			// Pass the context to the internal build function
+			chdResult, errResult := b.buildInternal(ctx, seed, attemptID)
 
 			// Send result regardless of context cancellation state for now.
 			// The receiver loop will handle ignoring late results.
@@ -301,7 +301,15 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 }
 
 // buildInternal performs a single attempt to build the CHD table using a specific seed.
-func (b *CHDBuilder) buildInternal(buildSeed int64, attemptID int) (*CHD, error) {
+// buildInternal performs a single attempt to build the CHD table using a specific seed.
+// It checks the provided context for cancellation requests.
+func (b *CHDBuilder) buildInternal(ctx context.Context, buildSeed int64, attemptID int) (*CHD, error) {
+	// Check for cancellation at the very beginning
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
 	n := uint64(len(b.keys))
 	mFloat := float64(n) * b.bucketRatio
 	m := uint64(mFloat)
@@ -363,11 +371,25 @@ func (b *CHDBuilder) buildInternal(buildSeed int64, attemptID int) (*CHD, error)
 		TotalBuckets: totalBuckets,
 		Stage:        "Assigning Hashes",
 	}, attemptID)
+	
+	// Check for cancellation before starting main loop
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
 
 nextBucket:
 	for i, bucket := range buckets {
 		if len(bucket.keys) == 0 {
 			continue
+		}
+		
+		// Check for cancellation at the start of processing each bucket
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
 		}
 
 		b.sendProgress(BuildProgress{
@@ -387,6 +409,13 @@ nextBucket:
 		// Keep trying new functions until we get one that does not collide.
 		// The number of retries here is very high to allow a very high
 		// probability of not getting collisions.
+		// Check for cancellation before entering potentially long retry loop
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		
 		for coll := 0; coll < b.retryLimit; coll++ {
 			b.sendProgress(BuildProgress{
 				BucketsProcessed:        i,

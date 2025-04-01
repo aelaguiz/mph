@@ -829,6 +829,81 @@ func TestBuildParallelReturnsOnFirstSuccess(t *testing.T) {
 
 // --- End of New Phase 6b Tests ---
 
+// --- Start of New Phase 6c Tests ---
+
+func TestBuildParallelContextCancellation(t *testing.T) {
+	numAttempts := 2
+	progressChan := make(chan BuildProgress, 500) // Need enough buffer
+
+	// Configure builder for two attempts
+	builder := Builder().ProgressChan(progressChan)
+	_, err := builder.ParallelAttempts(numAttempts)
+	require.NoError(t, err)
+
+	// Make the build process reasonably long IF it doesn't succeed quickly.
+	// Use a moderate retry limit and a dataset that might require some retries.
+	_, err = builder.RetryLimit(500) // Moderate limit
+	require.NoError(t, err)
+	keys := words[:100] // Larger dataset
+	vals := make([][]byte, len(keys))
+	for i := range keys { vals[i] = []byte(fmt.Sprintf("v%d",i)) }
+
+	// Don't set a specific seed, let the logic generate them. We *expect* one
+	// attempt to likely succeed before the other finishes all retries or buckets.
+
+	startTime := time.Now()
+	c, buildErr := buildCHDFromSlices(t, keys, vals, builder)
+	duration := time.Since(startTime)
+
+	// We expect one attempt to succeed
+	require.NoError(t, buildErr, "Build failed unexpectedly, cannot test cancellation effect")
+	require.NotNil(t, c)
+
+	// Read progress messages until channel is closed or we get enough
+	close(progressChan) // Close to drain in the range loop
+
+	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
+	firstSuccessfulAttemptID := -1
+
+	for p := range progressChan {
+		receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
+		if p.Stage == "Complete" && firstSuccessfulAttemptID == -1 {
+			firstSuccessfulAttemptID = p.AttemptID
+		}
+	}
+
+	require.NotEqual(t, -1, firstSuccessfulAttemptID, "Expected one attempt to complete successfully")
+	require.Len(t, receivedProgress, numAttempts, "Expected progress from both attempts initially")
+
+	// Analyze the *other* attempt (the one that should have been cancelled)
+	cancelledAttemptID := -1
+	for id := 1; id <= numAttempts; id++ {
+		if id != firstSuccessfulAttemptID {
+			cancelledAttemptID = id
+			break
+		}
+	}
+	require.NotEqual(t, -1, cancelledAttemptID, "Could not identify the cancelled attempt")
+
+	cancelledMsgs := receivedProgress[cancelledAttemptID]
+	require.NotEmpty(t, cancelledMsgs, "Cancelled attempt should have sent some progress")
+
+	lastCancelledMsg := cancelledMsgs[len(cancelledMsgs)-1]
+	t.Logf("Successful attempt: %d. Cancelled attempt: %d. Last stage for cancelled: %s, Buckets: %d/%d, Collisions: %d",
+		firstSuccessfulAttemptID, cancelledAttemptID, lastCancelledMsg.Stage, lastCancelledMsg.BucketsProcessed, lastCancelledMsg.TotalBuckets, lastCancelledMsg.CurrentBucketCollisions)
+
+	// Assert that the cancelled attempt did NOT reach the "Complete" stage
+	assert.NotEqual(t, "Complete", lastCancelledMsg.Stage,
+		"Cancelled attempt (%d) should not have reached 'Complete' stage", cancelledAttemptID)
+
+	// We could also add timing checks, e.g., assert duration is less than
+	// what a single full attempt with many retries would take, but this is harder
+	// to make reliable across different machines. Checking the final stage is more robust.
+	t.Logf("Total parallel build duration with cancellation: %v", duration)
+}
+
+// --- End of New Phase 6c Tests ---
+
 func BenchmarkBuiltinMap(b *testing.B) {
 	keys := []string{}
 	d := map[string]string{}
