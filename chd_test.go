@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"reflect" // Added for diagnostics
 	"io"
 	"os"
+	"reflect" // Added for diagnostics
 	"runtime"
 	"sync" // Added for non-blocking test
 	"testing"
@@ -410,12 +410,12 @@ func TestBuilderSetProgressChan(t *testing.T) {
 
 	assert.Same(t, b, retBuilder, "ProgressChan should return the builder instance")
 	assert.NotNil(t, b.progressChan, "progressChan should be set after calling ProgressChan")
-	
+
 	// --- DIAGNOSTICS START ---
 	t.Logf("Type of ch: %v, Address: %p", reflect.TypeOf(ch), ch)
 	t.Logf("Type of b.progressChan: %v, Address: %p", reflect.TypeOf(b.progressChan), b.progressChan)
 	// --- DIAGNOSTICS END ---
-	
+
 	// Compare the underlying channel pointers since types differ (chan T vs chan<- T)
 	chPtr := reflect.ValueOf(ch).Pointer()
 	progressChanPtr := reflect.ValueOf(b.progressChan).Pointer()
@@ -497,7 +497,9 @@ func TestBuildProgressNonBlockingSend(t *testing.T) {
 	// Use a slightly larger dataset to ensure multiple progress updates are attempted
 	keys := words[:30]
 	vals := make([][]byte, len(keys))
-	for i := range keys { vals[i] = keys[i] }
+	for i := range keys {
+		vals[i] = keys[i]
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -513,7 +515,7 @@ func TestBuildProgressNonBlockingSend(t *testing.T) {
 	// Only read the *first* progress message (or none if build is super fast)
 	// Then let the channel block potential future sends.
 	readDone := make(chan bool)
-	go func(){
+	go func() {
 		select {
 		case <-progressChan:
 			// Successfully read one message
@@ -525,11 +527,11 @@ func TestBuildProgressNonBlockingSend(t *testing.T) {
 		close(readDone)
 	}()
 
-	<- readDone // Wait until we have attempted to read one message
+	<-readDone // Wait until we have attempted to read one message
 
 	// Wait for the build goroutine to finish
 	buildFinishChan := make(chan bool)
-	go func(){
+	go func() {
 		wg.Wait()
 		close(buildFinishChan)
 	}()
@@ -623,7 +625,9 @@ func TestBuildParallelAllFail(t *testing.T) {
 	// Use a slightly larger dataset where failure is more likely with limit 1
 	testKeys := words[:20]
 	testVals := make([][]byte, len(testKeys))
-	for i := range testKeys { testVals[i] = []byte(fmt.Sprintf("v%d",i)) }
+	for i := range testKeys {
+		testVals[i] = []byte(fmt.Sprintf("v%d", i))
+	}
 
 	_, err = buildCHDFromSlices(t, testKeys, testVals, b)
 	require.Error(t, err, "Build should fail when all parallel attempts fail")
@@ -645,14 +649,16 @@ func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
 	// Make build slightly longer to see more progress interleaving
 	keys := words[:50]
 	vals := make([][]byte, len(keys))
-	for i := range keys { vals[i] = []byte(fmt.Sprintf("val%d",i)) }
+	for i := range keys {
+		vals[i] = []byte(fmt.Sprintf("val%d", i))
+	}
 
 	_, buildErr := buildCHDFromSlices(t, keys, vals, b)
 	require.NoError(t, buildErr)
 	// It's tricky to reliably close the channel now, as we return on first success.
 	// Instead, wait briefly for messages to flush.
 	time.Sleep(100 * time.Millisecond) // Allow time for messages to arrive
-	close(progressChan) // Close it now
+	close(progressChan)                // Close it now
 
 	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
 	var firstSuccessfulAttemptID int = -1
@@ -679,16 +685,18 @@ func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
 	// Check if attempts other than the first successful one potentially stopped early
 	// (This is not guaranteed without context propagation, but check if progress suggests it)
 	if len(receivedProgress) > 1 {
-		foundShorter := false
+		// foundShorter := false
 		for id, msgs := range receivedProgress {
 			if id != firstSuccessfulAttemptID {
-				if len(msgs) == 0 { continue } // Possible if success was immediate
+				if len(msgs) == 0 {
+					continue
+				} // Possible if success was immediate
 				lastMsg := msgs[len(msgs)-1]
 				// Check if it finished *before* reaching the end
 				if lastMsg.Stage != "Complete" || lastMsg.BucketsProcessed < lastMsg.TotalBuckets {
-					foundShorter = true
-					t.Logf("Attempt %d likely stopped early (last stage: %s, buckets: %d/%d)", 
-					        id, lastMsg.Stage, lastMsg.BucketsProcessed, lastMsg.TotalBuckets)
+					// foundShorter = true
+					t.Logf("Attempt %d likely stopped early (last stage: %s, buckets: %d/%d)",
+						id, lastMsg.Stage, lastMsg.BucketsProcessed, lastMsg.TotalBuckets)
 				}
 			}
 		}
@@ -709,7 +717,9 @@ func TestBuildParallelReturnsOnFirstSuccess(t *testing.T) {
 
 	testKeys := words[:30] // Use a dataset that requires >1 retry sometimes
 	testVals := make([][]byte, len(testKeys))
-	for i := range testKeys { testVals[i] = []byte(fmt.Sprintf("v%d",i)) }
+	for i := range testKeys {
+		testVals[i] = []byte(fmt.Sprintf("v%d", i))
+	}
 
 	numAttempts := 3
 	//successSeed := int64(101) // Assume this seed works with default limit
