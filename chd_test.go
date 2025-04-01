@@ -3,8 +3,10 @@ package mph
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -21,6 +23,8 @@ var (
 		"six":   "6",
 		"seven": "7",
 	}
+	sampleKeys [][]byte
+	sampleVals [][]byte
 )
 
 var (
@@ -28,19 +32,46 @@ var (
 )
 
 func init() {
+	// Check if we are in the correct directory relative to testdata
+	// This can happen if tests are run from a different working directory
+	if _, err := os.Stat("testdata/words"); os.IsNotExist(err) {
+		// Try navigating up one level if common 'go test ./...' pattern is used
+		if _, err := os.Stat("../testdata/words"); err == nil {
+			os.Chdir("..") // Go up one level
+		} else {
+			// If still not found, panic as before, but provide more context
+			wd, _ := os.Getwd()
+			panic("testdata/words not found relative to working directory: " + wd)
+		}
+	}
+
 	f, err := os.Open("testdata/words")
 	if err != nil {
 		panic(err)
 	}
+	defer f.Close() // Ensure file is closed
 	r := bufio.NewReader(f)
 	for {
 		line, err := r.ReadBytes('\n')
+		// Trim newline characters for cleaner keys
+		line = bytes.TrimRight(line, "\r\n")
+		if len(line) > 0 { // Avoid adding empty lines if any
+			words = append(words, line)
+		}
 		if err == io.EOF {
 			break
 		} else if err != nil {
 			panic(err)
 		}
-		words = append(words, line)
+	}
+	if len(words) == 0 {
+		panic("failed to load any words from testdata/words")
+	}
+
+	// Pre-slice sample data for convenience in tests
+	for k, v := range sampleData {
+		sampleKeys = append(sampleKeys, []byte(k))
+		sampleVals = append(sampleVals, []byte(v))
 	}
 }
 
@@ -50,6 +81,49 @@ func cmpDataSlice(t *testing.T, cl, cr *CHD, l, r []dataSlice) {
 	for i := 0; len(l) > i; i++ {
 		assert.Equal(t, cl.slice(l[i]), cr.slice(r[i]))
 	}
+}
+
+// Helper to build a CHD from key/value slices for tests
+func buildCHDFromSlices(t *testing.T, keys, values [][]byte, builder *CHDBuilder) (*CHD, error) {
+	t.Helper()
+	if builder == nil {
+		builder = Builder()
+	}
+	for i := range keys {
+		builder.Add(keys[i], values[i])
+	}
+	// Force GC before build to get more stable memory measurements if needed later
+	runtime.GC()
+	return builder.Build()
+}
+
+// Helper to compare two CHD tables
+func assertCHDEqual(t *testing.T, expected, actual *CHD) {
+	t.Helper()
+	require.NotNil(t, expected)
+	require.NotNil(t, actual)
+	assert.Equal(t, expected.r, actual.r, "Random vectors 'r' should be equal")
+	assert.Equal(t, expected.indices, actual.indices, "Indices should be equal")
+	// We need to compare the underlying data referenced by keys/values, not just the slices themselves
+	require.Equal(t, len(expected.keys), len(actual.keys), "Number of keys should be equal")
+	require.Equal(t, len(expected.values), len(actual.values), "Number of values should be equal")
+
+	// Build maps for easier comparison of content
+	mapExpected := make(map[string]string)
+	mapActual := make(map[string]string)
+
+	for i := range expected.keys {
+		keyBytes := expected.slice(expected.keys[i])
+		valBytes := expected.slice(expected.values[i])
+		mapExpected[string(keyBytes)] = string(valBytes)
+	}
+	for i := range actual.keys {
+		keyBytes := actual.slice(actual.keys[i])
+		valBytes := actual.slice(actual.values[i])
+		mapActual[string(keyBytes)] = string(valBytes)
+	}
+
+	assert.Equal(t, mapExpected, mapActual, "Key/value content should be identical")
 }
 
 func TestCHDBuilder(t *testing.T) {
@@ -206,6 +280,117 @@ func TestBuilderSettersInvalid(t *testing.T) {
 }
 
 // --- End of New Phase 1 Tests ---
+
+// --- Start of New Phase 2 Tests ---
+
+// TestBuildUsesSeed verifies that providing the same seed results in identical tables.
+func TestBuildUsesSeed(t *testing.T) {
+	seed := int64(12345)
+
+	b1 := Builder().Seed(seed)
+	c1, err := buildCHDFromSlices(t, sampleKeys, sampleVals, b1)
+	require.NoError(t, err, "Build 1 should succeed")
+
+	b2 := Builder().Seed(seed)
+	c2, err := buildCHDFromSlices(t, sampleKeys, sampleVals, b2)
+	require.NoError(t, err, "Build 2 should succeed")
+
+	b3 := Builder().Seed(seed + 1) // Different seed
+	c3, err := buildCHDFromSlices(t, sampleKeys, sampleVals, b3)
+	require.NoError(t, err, "Build 3 should succeed")
+
+	assertCHDEqual(t, c1, c2)
+
+	// Verify that c3 is different (highly likely, though theoretically could be same)
+	// Comparing 'r' is a good indicator of difference.
+	assert.NotEqual(t, c1.r, c3.r, "Different seeds should likely produce different 'r' vectors")
+}
+
+// TestBuildUsesRetryLimit verifies that a low limit causes failure
+// and a high limit allows success for a potentially tricky build.
+// Note: Finding a reliable small dataset + seed that *requires* many retries
+// is difficult. This test uses a very low limit to force failure easily.
+func TestBuildUsesRetryLimit(t *testing.T) {
+	// Use a slightly larger dataset than sampleData
+	testKeys := words[:50] // Use first 50 words
+	testVals := make([][]byte, len(testKeys))
+	for i := range testKeys {
+		testVals[i] = []byte(fmt.Sprintf("val%d", i))
+	}
+
+	seed := int64(42) // Use a fixed seed
+
+	// Force failure with an extremely low limit
+	bFail := Builder().Seed(seed)
+	_, err := bFail.RetryLimit(1) // Set limit ridiculously low
+	require.NoError(t, err)       // Setting the limit should not error
+	_, err = buildCHDFromSlices(t, testKeys, testVals, bFail)
+	assert.Error(t, err, "Build should fail with retry limit 1")
+	assert.Contains(t, err.Error(), "failed to find a collision-free hash function after ~1 attempts")
+
+	// Allow success with the default (or a reasonably high) limit
+	bSucceed := Builder().Seed(seed)
+	_, err = bSucceed.RetryLimit(10_000_000) // Default limit should be sufficient
+	require.NoError(t, err)                  // Setting the limit should not error
+	c, err := buildCHDFromSlices(t, testKeys, testVals, bSucceed)
+	assert.NoError(t, err, "Build should succeed with default retry limit")
+	require.NotNil(t, c)
+	assert.Equal(t, len(testKeys), c.Len()) // Verify basic correctness
+}
+
+// TestBuildUsesBucketRatio verifies builds succeed with different valid ratios.
+// Directly verifying the internal 'm' is hard without exposing it, so we mainly
+// check for successful completion.
+func TestBuildUsesBucketRatio(t *testing.T) {
+	seed := int64(99)
+
+	ratios := []float64{0.5, 0.75, 1.0, 1.2} // Test various ratios
+
+	for _, ratio := range ratios {
+		t.Run(fmt.Sprintf("Ratio_%.2f", ratio), func(t *testing.T) {
+			b := Builder().Seed(seed)
+			_, err := b.BucketRatio(ratio)
+			require.NoError(t, err, "Setting bucket ratio should succeed")
+
+			c, err := buildCHDFromSlices(t, sampleKeys, sampleVals, b)
+			assert.NoError(t, err, "Build should succeed with bucket ratio %.2f", ratio)
+			require.NotNil(t, c)
+			assert.Equal(t, len(sampleKeys), c.Len())
+
+			// Verify content
+			for i := range sampleKeys {
+				val := c.Get(sampleKeys[i])
+				assert.Equal(t, sampleVals[i], val, "Mismatch for key %s", string(sampleKeys[i]))
+			}
+		})
+	}
+}
+
+// TestBuildUsesDefaults verifies that a build works correctly when no
+// parameters are explicitly set.
+func TestBuildUsesDefaults(t *testing.T) {
+	// Use a non-trivial number of keys
+	keys := words[:100]
+	vals := make([][]byte, len(keys))
+	for i := range keys {
+		vals[i] = keys[i] // Value is same as key
+	}
+
+	b := Builder() // No setters called
+	c, err := buildCHDFromSlices(t, keys, vals, b)
+
+	require.NoError(t, err, "Build with default parameters failed")
+	require.NotNil(t, c)
+	assert.Equal(t, len(keys), c.Len(), "Length mismatch with default build")
+
+	// Spot check a few keys
+	assert.Equal(t, keys[0], c.Get(keys[0]))
+	assert.Equal(t, keys[len(keys)/2], c.Get(keys[len(keys)/2]))
+	assert.Equal(t, keys[len(keys)-1], c.Get(keys[len(keys)-1]))
+	assert.Nil(t, c.Get([]byte("this key does not exist")))
+}
+
+// --- End of New Phase 2 Tests ---
 
 func BenchmarkBuiltinMap(b *testing.B) {
 	keys := []string{}

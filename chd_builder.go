@@ -138,7 +138,10 @@ func tryHash(hasher *chdHasher, seen map[uint64]bool, keys [][]byte, values [][]
 
 func (b *CHDBuilder) Build() (*CHD, error) {
 	n := uint64(len(b.keys))
-	m := n / 2
+	// Calculate m (number of buckets) using the configured bucketRatio
+	mFloat := float64(n) * b.bucketRatio
+	m := uint64(mFloat)
+	// Ensure at least one bucket, especially if n=0 or ratio is very small
 	if m == 0 {
 		m = 1
 	}
