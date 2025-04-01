@@ -414,8 +414,10 @@ func TestBuilderSetProgressChan(t *testing.T) {
 	t.Logf("Type of b.progressChan: %v, Address: %p", reflect.TypeOf(b.progressChan), b.progressChan)
 	// --- DIAGNOSTICS END ---
 	
-	// Use assert.Equal for channels as types might differ (chan T vs chan<- T)
-	assert.Equal(t, ch, b.progressChan, "progressChan should be the one provided")
+	// Compare the underlying channel pointers since types differ (chan T vs chan<- T)
+	chPtr := reflect.ValueOf(ch).Pointer()
+	progressChanPtr := reflect.ValueOf(b.progressChan).Pointer()
+	assert.Equal(t, chPtr, progressChanPtr, "progressChan should point to the same underlying channel provided")
 
 	// Test setting it back to nil
 	retBuilder = b.ProgressChan(nil)
