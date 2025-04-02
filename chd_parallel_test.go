@@ -647,9 +647,7 @@ func TestBuildParallelExtensive(t *testing.T) {
 		// Signal build completion first
 		log.Printf("[Test Build Goroutine] Sending completion signal on buildDone")
 		buildDone <- err
-		// THEN close progressChan to signal the reader there are no more messages
-		log.Printf("[Test Build Goroutine] Closing progressChan")
-		close(progressChan)
+		// DO NOT close progressChan here - the builder will do it after all workers complete
 	}()
 
 	// Wait for build to finish

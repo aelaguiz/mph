@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/rand"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -225,6 +226,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 	// --- Parallel Attempt Path (Phase 6b Logic) ---
 	numAttempts := b.parallelSeedAttempts
 	resultsChan := make(chan buildResult, numAttempts) // Buffered channel for all results
+	var workersWg sync.WaitGroup // Use WG to track worker goroutine completion for progress channel closing
 
 	// Use context for cancellation
 	ctx, cancel := context.WithCancel(context.Background())
@@ -248,9 +250,14 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 		attemptSeeds[i] = seed
 	}
 
+	// Add workers to WaitGroup before launching goroutines
+	workersWg.Add(numAttempts)
+	
 	// Launch goroutines
 	for i := 0; i < numAttempts; i++ {
 		go func(attemptIdx int) {
+			defer workersWg.Done() // Signal worker completion
+			
 			seed := attemptSeeds[attemptIdx]
 			attemptID := attemptIdx + 1 // 1-based ID
 
@@ -268,6 +275,15 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 				seed:      seed,
 			}
 		}(i)
+	}
+	
+	// Only close the progress channel after all workers are done
+	if b.progressChan != nil {
+		go func() {
+			workersWg.Wait() // Wait for all buildInternal calls to return
+			log.Printf("[Build] All workers completed, closing progress channel")
+			close(b.progressChan)
+		}()
 	}
 
 	// Wait for the first success or all errors
