@@ -151,27 +151,29 @@ func (b *CHDBuilder) sendProgress(progress BuildProgress, attemptID int) {
 	}
 
 	if b.progressChan != nil {
+		// Log attempt BEFORE trying to send
+		log.Printf("[sendProgress %d] Attempting to send stage '%s' (Buckets: %d/%d, Collisions: %d)",
+			attemptID, progress.Stage, progress.BucketsProcessed, progress.TotalBuckets, progress.CurrentBucketCollisions)
+		
 		// For Complete stage messages, add more detailed logging
 		if progress.Stage == "Complete" {
 			startTime := time.Now()
-			log.Printf("[sendProgress] Attempting to send 'Complete' stage message for AttemptID=%d at %v", attemptID, startTime)
-			
 			select {
 			case b.progressChan <- progress:
 				duration := time.Since(startTime)
-				log.Printf("[sendProgress] Successfully sent 'Complete' stage message for AttemptID=%d after %v", attemptID, duration)
+				log.Printf("[sendProgress %d] Successfully sent 'Complete' stage message after %v", attemptID, duration)
 			default:
-				log.Printf("[sendProgress] WARNING: Dropped 'Complete' stage message for AttemptID=%d (channel full or closed)", attemptID)
+				log.Printf("[sendProgress %d] DROPPED 'Complete' stage message (channel full or closed)", attemptID)
 			}
 			return // Done processing Complete message
 		}
 		
-		// Normal non-Complete messages just use non-blocking send
+		// Normal non-Complete messages also get basic logging
 		select {
 		case b.progressChan <- progress:
-			// Sent successfully
+			log.Printf("[sendProgress %d] Successfully sent stage '%s'", attemptID, progress.Stage)
 		default:
-			// Channel buffer is full or receiver is not ready; drop progress update
+			log.Printf("[sendProgress %d] DROPPED stage '%s' (channel full or closed)", attemptID, progress.Stage)
 		}
 	}
 }
