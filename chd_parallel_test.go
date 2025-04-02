@@ -453,8 +453,7 @@ func TestBuildParallelReturnsOnFirstSuccess(t *testing.T) {
 		}
 	}()
 
-	// Now run the build and time it
-	startTime := time.Now()
+	// Now run the build
 	c, buildErr := buildCHDFromSlices(t, keys, vals, builder)
 
 	// We expect one attempt to succeed
@@ -518,10 +517,8 @@ func TestBuildParallelContextCancellation(t *testing.T) {
 		}
 	}()
 
-	// Now run the build and time it
-	startTime := time.Now()
+	// Now run the build
 	c, buildErr := buildCHDFromSlices(t, keys, vals, builder)
-	duration := time.Since(startTime)
 
 	// We expect one attempt to succeed
 	require.NoError(t, buildErr, "Build failed unexpectedly, cannot test cancellation effect")
