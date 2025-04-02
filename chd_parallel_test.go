@@ -640,7 +640,6 @@ func TestBuildParallelExtensive(t *testing.T) {
 		stagesPerAttempt := make(map[int]map[string]int)
 		
 		for p := range progressChan {
-			receiveTime := time.Now()
 			messageCount++
 			messagesPerAttempt[p.AttemptID]++
 			
