@@ -151,11 +151,22 @@ func (b *CHDBuilder) sendProgress(progress BuildProgress, attemptID int) {
 	}
 
 	if b.progressChan != nil {
+		// For Complete stage messages, add more logging for troubleshooting
+		if progress.Stage == "Complete" {
+			log.Printf("[sendProgress] Attempting to send 'Complete' stage message for AttemptID=%d", attemptID)
+		}
+		
 		select {
 		case b.progressChan <- progress:
 			// Sent successfully
+			if progress.Stage == "Complete" {
+				log.Printf("[sendProgress] Successfully sent 'Complete' stage message for AttemptID=%d", attemptID)
+			}
 		default:
-			// Channel buffer is full or receiver is not ready; drop progress update.
+			// Channel buffer is full or receiver is not ready; drop progress update
+			if progress.Stage == "Complete" {
+				log.Printf("[sendProgress] WARNING: Dropped 'Complete' stage message for AttemptID=%d (channel full or closed)", attemptID)
+			}
 		}
 	}
 }
@@ -263,26 +274,32 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 
 			// Pass the context to the internal build function
 			log.Printf("[Build Worker %d] Starting buildInternal with seed %d", attemptID, seed)
+			startTime := time.Now() // Log duration of buildInternal
 			chdResult, errResult := b.buildInternal(ctx, seed, attemptID)
-			log.Printf("[Build Worker %d] buildInternal finished. err=%v", attemptID, errResult)
+			duration := time.Since(startTime)
+			log.Printf("[Build Worker %d] buildInternal finished. err=%v, duration: %v", attemptID, errResult, duration)
 
 			// Send result regardless of context cancellation state for now.
 			// The receiver loop will handle ignoring late results.
+			log.Printf("[Build Worker %d] Sending result to resultsChan...", attemptID)
 			resultsChan <- buildResult{
 				chd:       chdResult, 
 				err:       errResult,
 				attemptID: attemptID,
 				seed:      seed,
 			}
+			log.Printf("[Build Worker %d] Sent result to resultsChan. (Worker goroutine will exit soon)", attemptID)
 		}(i)
 	}
 	
 	// Only close the progress channel after all workers are done
 	if b.progressChan != nil {
 		go func() {
+			log.Printf("[Build] Starting WaitGroup goroutine to wait for all workers to complete")
 			workersWg.Wait() // Wait for all buildInternal calls to return
 			log.Printf("[Build] All workers completed, closing progress channel")
 			close(b.progressChan)
+			log.Printf("[Build] Progress channel closed")
 		}()
 	}
 
@@ -293,7 +310,11 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 
 	for i := 0; i < numAttempts; i++ { // Loop exactly numAttempts times to collect all results
 		select {
-		case result := <-resultsChan:
+		case result, ok := <-resultsChan:
+			if !ok {
+				log.Printf("[Build] Results channel closed unexpectedly during receive loop")
+				break // Should not happen if we loop numAttempts times
+			}
 			log.Printf("[Build] Received result from Attempt %d. Success=%t, Err=%v", 
 				result.attemptID, result.err == nil && result.chd != nil, result.err)
 			if result.err == nil && result.chd != nil {
@@ -302,7 +323,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 					log.Printf("[Build] First success from Attempt %d. Cancelling others.", result.attemptID)
 					firstSuccess = result.chd
 					cancel() // Signal other goroutines to stop (they might not react yet in 6b)
-					log.Printf("[Build] Cancel() called.")
+					log.Printf("[Build] Context cancel() function called.")
 					// Note: We still loop numAttempts times to drain the channel,
 					// but we've captured the first success.
 				}
@@ -320,6 +341,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 		}
 	}
 
+	log.Printf("[Build] Finished draining results channel")
 	if firstSuccess != nil {
 		log.Printf("[Build] Returning successful CHD.")
 		return firstSuccess, nil // Return the first success we found
@@ -523,16 +545,17 @@ nextBucket:
 
 	// If we got here, packing is done. Send Complete and return success.
 	// Do NOT check for cancellation here, otherwise the winning goroutine might fail to report success.
-	log.Printf("[buildInternal %d] Packing complete. Sending 'Complete' progress.", attemptID)
+	log.Printf("[buildInternal %d] Packing complete. Sending 'Complete' progress...", attemptID)
 	
-	b.sendProgress(BuildProgress{
+	completeProgress := BuildProgress{
 		BucketsProcessed: totalBuckets,
 		TotalBuckets:     totalBuckets,
 		AttemptID:        attemptID,
 		Stage:            "Complete", // Final status
-	}, attemptID)
-
-	log.Printf("[buildInternal %d] Successfully built CHD.", attemptID)
+	}
+	b.sendProgress(completeProgress, attemptID)
+	
+	log.Printf("[buildInternal %d] 'Complete' progress message sent. Successfully built CHD object.", attemptID)
 	finalCHD = &CHD{
 		r:       hasher.r,
 		indices: indices,

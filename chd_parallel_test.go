@@ -628,34 +628,48 @@ func TestBuildParallelExtensive(t *testing.T) {
 	go func() {
 		defer close(readDone)
 		log.Printf("[Test Reader] Starting progress reader goroutine")
+		messageCount := 0
 		for p := range progressChan {
-			log.Printf("[Test Reader] Received progress message: AttemptID=%d, Stage=%s, Buckets=%d/%d, Collisions=%d",
-				p.AttemptID, p.Stage, p.BucketsProcessed, p.TotalBuckets, p.CurrentBucketCollisions)
+			messageCount++
+			log.Printf("[Test Reader] Received progress message #%d: AttemptID=%d, Stage=%s, Buckets=%d/%d, Collisions=%d",
+				messageCount, p.AttemptID, p.Stage, p.BucketsProcessed, p.TotalBuckets, p.CurrentBucketCollisions)
 			progressMutex.Lock()
 			receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
 			progressMutex.Unlock()
+			
+			// Log specifically when we see a Complete message
+			if p.Stage == "Complete" {
+				log.Printf("[Test Reader] *** COMPLETE MESSAGE RECEIVED for AttemptID=%d ***", p.AttemptID)
+			}
 		}
-		log.Printf("[Test Reader] Progress reader goroutine finished (channel closed)")
+		log.Printf("[Test Reader] Progress reader goroutine finished (channel closed) after reading %d messages", messageCount)
 	}()
 
 	buildDone := make(chan error)
 	var builtCHD *CHD
 	startTime = time.Now()
 	go func() {
+		startTime := time.Now()
 		builtCHD, err = buildCHDFromSlices(t, keys, vals, builder)
-		log.Printf("[Test Build Goroutine] buildCHDFromSlices completed. err=%v", err)
+		buildDuration := time.Since(startTime)
+		log.Printf("[Test Build Goroutine] buildCHDFromSlices completed in %v. err=%v", buildDuration, err)
 		// Signal build completion first
 		log.Printf("[Test Build Goroutine] Sending completion signal on buildDone")
 		buildDone <- err
 		// DO NOT close progressChan here - the builder will do it after all workers complete
+		log.Printf("[Test Build Goroutine] Sent signal, now exiting")
 	}()
 
+	log.Printf("[Test Main] Waiting for buildDone signal...")
+	
 	// Wait for build to finish
 	buildErr := <-buildDone
 	log.Printf("[Test Main] Received completion signal from buildDone. err=%v", buildErr)
-	// Wait for reading goroutine to finish processing all messages
+	
+	// Now wait for reader goroutine to finish (which happens when progress channel is closed by builder)
+	log.Printf("[Test Main] Waiting for reader goroutine to finish...")
 	<-readDone
-	log.Printf("[Test Main] Reader goroutine finished")
+	log.Printf("[Test Main] Reader goroutine finished. Proceeding to analysis.")
 	duration := time.Since(startTime)
 	// --- End Build and Collect Progress ---
 
