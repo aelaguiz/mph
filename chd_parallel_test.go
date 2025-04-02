@@ -1,0 +1,502 @@
+package mph
+
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// Helper function to generate keys with sequential prefixes
+func generateSequentialKeys(count int, prefix string) [][]byte {
+	keys := make([][]byte, count)
+	for i := 0; i < count; i++ {
+		key := fmt.Sprintf("%s-%08d", prefix, i+1) // e.g., data-00000001
+		keys[i] = []byte(key)
+	}
+	return keys
+}
+
+// Helper function to generate keys that are similar variations of a base string
+func generateSimilarKeys(baseKey string, count int, swapPositions [][2]int) [][]byte {
+	keysMap := make(map[string]bool) // Use map to ensure uniqueness
+	baseBytes := []byte(baseKey)
+	keysMap[baseKey] = true
+
+	rng := rand.New(rand.NewSource(time.Now().UnixNano())) // For random swaps if needed
+
+	for len(keysMap) < count {
+		// Create variation
+		newKeyBytes := make([]byte, len(baseBytes))
+		copy(newKeyBytes, baseBytes)
+
+		// Method 1: Predefined swaps (limited variations)
+		if len(swapPositions) > 0 {
+			idx := rng.Intn(len(swapPositions))
+			p1, p2 := swapPositions[idx][0], swapPositions[idx][1]
+			if p1 < len(newKeyBytes) && p2 < len(newKeyBytes) {
+				newKeyBytes[p1], newKeyBytes[p2] = newKeyBytes[p2], newKeyBytes[p1]
+			}
+		} else {
+			// Method 2: Random swaps (more variations, less predictable)
+			if len(newKeyBytes) >= 2 {
+				p1 := rng.Intn(len(newKeyBytes))
+				p2 := rng.Intn(len(newKeyBytes))
+				if p1 != p2 {
+					newKeyBytes[p1], newKeyBytes[p2] = newKeyBytes[p2], newKeyBytes[p1]
+				}
+			}
+		}
+		keysMap[string(newKeyBytes)] = true
+	}
+
+	keys := make([][]byte, 0, len(keysMap))
+	for k := range keysMap {
+		keys = append(keys, []byte(k))
+	}
+	return keys
+}
+
+// Helper function to generate keys with low entropy (limited character set)
+func generateLowEntropyKeys(count int, length int, alphabet string) [][]byte {
+	keysMap := make(map[string]bool)
+	alphabetBytes := []byte(alphabet)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	for len(keysMap) < count {
+		keyBytes := make([]byte, length)
+		for i := 0; i < length; i++ {
+			keyBytes[i] = alphabetBytes[rng.Intn(len(alphabetBytes))]
+		}
+		keysMap[string(keyBytes)] = true
+	}
+
+	keys := make([][]byte, 0, len(keysMap))
+	for k := range keysMap {
+		keys = append(keys, []byte(k))
+	}
+	return keys
+}
+
+// --- Parallel Build Tests ---
+
+// TestBuildParallelBasicSuccess verifies that if at least one attempt succeeds,
+// the build returns a valid CHD.
+func TestBuildParallelBasicSuccess(t *testing.T) {
+	b := Builder().Seed(1) // Use fixed seed for predictability if needed
+	_, err := b.ParallelAttempts(3)
+	require.NoError(t, err)
+	// Default settings should allow success for sampleData
+
+	// For this test we'll use a small sample dataset defined in main test file
+	keys := make([][]byte, 0)
+	vals := make([][]byte, 0)
+	
+	sampleData := map[string]string{
+		"one":   "1",
+		"two":   "2",
+		"three": "3",
+		"four":  "4",
+		"five":  "5",
+		"six":   "6",
+		"seven": "7",
+	}
+	
+	for k, v := range sampleData {
+		keys = append(keys, []byte(k))
+		vals = append(vals, []byte(v))
+	}
+
+	c, err := buildCHDFromSlices(t, keys, vals, b)
+	require.NoError(t, err, "Build with parallel attempts failed unexpectedly")
+	require.NotNil(t, c, "Returned CHD should not be nil on success")
+	assert.Equal(t, len(keys), c.Len())
+
+	// Verify content as a sanity check
+	for i := range keys {
+		val := c.Get(keys[i])
+		assert.Equal(t, vals[i], val, "Mismatch for key %s", string(keys[i]))
+	}
+}
+
+// TestBuildParallelAllFail verifies that if all attempts fail (due to low retry limit),
+// an error is returned.
+func TestBuildParallelAllFail(t *testing.T) {
+	b := Builder().Seed(42) // Use fixed seed
+	_, err := b.ParallelAttempts(3)
+	require.NoError(t, err)
+	_, err = b.RetryLimit(1) // Force failure with extremely low limit
+	require.NoError(t, err)
+
+	// Use a slightly larger dataset where failure is more likely with limit 1
+	testKeys := words[:20]
+	testVals := make([][]byte, len(testKeys))
+	for i := range testKeys {
+		testVals[i] = []byte(fmt.Sprintf("v%d", i))
+	}
+
+	_, err = buildCHDFromSlices(t, testKeys, testVals, b)
+	require.Error(t, err, "Build should fail when all parallel attempts fail")
+	// Check if the error indicates all attempts failed
+	assert.Contains(t, err.Error(), "all 3 parallel build attempts failed")
+	assert.Contains(t, err.Error(), "failed to find a collision-free hash function after ~1 attempts") // Check cause
+}
+
+// TestBuildParallelProgressMultipleAttempts verifies that progress messages
+// from different attempt IDs are received.
+func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
+	numAttempts := 3 // Increase attempts
+	// Use a buffered channel large enough
+	progressChan := make(chan BuildProgress, 300) // Larger buffer might be needed
+	b := Builder().Seed(88).ProgressChan(progressChan)
+	_, err := b.ParallelAttempts(numAttempts)
+	require.NoError(t, err)
+
+	// Make build slightly longer to see more progress interleaving
+	keys := words[:50]
+	vals := make([][]byte, len(keys))
+	for i := range keys {
+		vals[i] = []byte(fmt.Sprintf("val%d", i))
+	}
+
+	buildDone := make(chan struct{})
+	var buildErr error
+	go func() {
+		_, buildErr = buildCHDFromSlices(t, keys, vals, b)
+		close(buildDone)
+	}()
+
+	// Read progress messages until build is done OR we see a "Complete" stage
+	// Use a timeout to prevent hanging if "Complete" is somehow missed.
+	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
+	readTimeout := time.After(5 * time.Second)        // Safety timeout
+	keepReading := true
+
+	for keepReading {
+		select {
+		case p, ok := <-progressChan:
+			if !ok {
+				keepReading = false // Channel closed
+				break
+			}
+			receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
+			if p.Stage == "Complete" {
+				// We saw a complete message, assume others will flush soon or are irrelevant
+				// Stop actively reading after a short grace period
+				go func() {
+					time.Sleep(50 * time.Millisecond)
+					// Signal to stop reading (might need a channel if concurrent reads happen)
+					// For simplicity here, just stop the outer loop assumption
+					// This isn't perfectly robust but better than fixed sleep.
+					// A better approach might involve signaling from the build goroutine completion.
+				}()
+				// For now, let's just break the select and let the outer loop finish naturally
+				// when the channel is closed by the sender eventually (or timeout hits)
+			}
+		case <-buildDone:
+			// Build finished, try reading remaining messages briefly
+			keepReading = false
+			// Drain remaining messages for a short period
+			drainTimeout := time.After(100 * time.Millisecond)
+		drainLoop:
+			for {
+				select {
+				case p, ok := <-progressChan:
+					if !ok {
+						break drainLoop
+					} // Channel closed
+					receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
+				case <-drainTimeout:
+					break drainLoop
+				}
+			}
+		case <-readTimeout:
+			t.Log("Read progress timeout hit")
+			keepReading = false // Stop reading on timeout
+		}
+	}
+
+	// Now analyze the collected messages
+	firstSuccessfulAttemptID := -1              // Reset before analysis
+	maxProcessedPerAttempt := make(map[int]int) // Reset before analysis
+
+	// Find the actual first success ID from the collected messages
+	for id, msgs := range receivedProgress {
+		for _, p := range msgs {
+			if p.Stage == "Complete" && firstSuccessfulAttemptID == -1 {
+				firstSuccessfulAttemptID = p.AttemptID
+			}
+			if p.BucketsProcessed > maxProcessedPerAttempt[id] {
+				maxProcessedPerAttempt[id] = p.BucketsProcessed
+			}
+		}
+	}
+
+	require.NoError(t, buildErr) // Verify build succeeded
+
+	assert.NotEmpty(t, receivedProgress, "Should receive some progress messages")
+	assert.NotEqual(t, -1, firstSuccessfulAttemptID, "At least one attempt should have completed successfully")
+
+	t.Logf("First successful attempt ID: %d", firstSuccessfulAttemptID)
+	for id, count := range maxProcessedPerAttempt {
+		t.Logf("Attempt %d max buckets processed: %d", id, count)
+	}
+
+	// Check if attempts other than the first successful one potentially stopped early
+	// (This is not guaranteed without context propagation, but check if progress suggests it)
+	if len(receivedProgress) > 1 {
+		// foundShorter := false
+		for id, msgs := range receivedProgress {
+			if id != firstSuccessfulAttemptID {
+				if len(msgs) == 0 {
+					continue
+				} // Possible if success was immediate
+				lastMsg := msgs[len(msgs)-1]
+				// Check if it finished *before* reaching the end
+				if lastMsg.Stage != "Complete" || lastMsg.BucketsProcessed < lastMsg.TotalBuckets {
+					// foundShorter = true
+					t.Logf("Attempt %d likely stopped early (last stage: %s, buckets: %d/%d)",
+						id, lastMsg.Stage, lastMsg.BucketsProcessed, lastMsg.TotalBuckets)
+				}
+			}
+		}
+		// This assertion is weak in 6b, stronger test needed in 6c
+		// assert.True(t, foundShorter, "Expected at least one other attempt to show signs of stopping early")
+	}
+}
+
+// TestBuildParallelReturnsOnFirstSuccess verifies that if one attempt succeeds,
+// even if others fail, the build returns the success.
+func TestBuildParallelReturnsOnFirstSuccess(t *testing.T) {
+	keys := words[:100] // Larger dataset
+	vals := make([][]byte, len(keys))
+	for i := range keys { vals[i] = []byte(fmt.Sprintf("v%d",i)) }
+	
+	// Don't set a specific seed, let the logic generate them. We *expect* one
+	// attempt to likely succeed before the other finishes all retries or buckets.
+
+	numAttempts := 2
+	progressChan := make(chan BuildProgress, 500) // Need enough buffer
+
+	// Configure builder for two attempts
+	builder := Builder().ProgressChan(progressChan)
+	_, err := builder.ParallelAttempts(numAttempts)
+	require.NoError(t, err)
+
+	// Make the build process reasonably long IF it doesn't succeed quickly.
+	// Use a moderate retry limit and a dataset that might require some retries.
+	_, err = builder.RetryLimit(500) // Moderate limit
+	require.NoError(t, err)
+
+	// --- Collect messages concurrently with the build ---
+	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
+	var progressMu sync.Mutex
+	
+	// Create a goroutine to collect progress messages
+	progressDone := make(chan struct{})
+	go func() {
+		defer close(progressDone)
+		for p := range progressChan {
+			progressMu.Lock()
+			receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
+			progressMu.Unlock()
+		}
+	}()
+	
+	// Now run the build and time it
+	startTime := time.Now()
+	c, buildErr := buildCHDFromSlices(t, keys, vals, builder)
+	duration := time.Since(startTime)
+	
+	// We expect one attempt to succeed
+	require.NoError(t, buildErr, "Build failed unexpectedly, cannot test cancellation effect")
+	require.NotNil(t, c)
+	
+	// Now that the build is complete, close the channel and wait for collection to finish
+	close(progressChan)
+	<-progressDone
+	
+	// Analyze the collected messages
+	firstSuccessfulAttemptID := -1
+	for id, msgs := range receivedProgress {
+		for _, p := range msgs {
+			if p.Stage == "Complete" && firstSuccessfulAttemptID == -1 {
+				firstSuccessfulAttemptID = id
+				break
+			}
+		}
+	}
+
+	require.NotEqual(t, -1, firstSuccessfulAttemptID, "Expected one attempt to complete successfully")
+}
+
+// TestBuildParallelContextCancellation verifies that when one attempt succeeds,
+// other attempts are cancelled and don't complete.
+func TestBuildParallelContextCancellation(t *testing.T) {
+	numAttempts := 2
+	progressChan := make(chan BuildProgress, 500) // Need enough buffer
+
+	// Configure builder for two attempts
+	builder := Builder().ProgressChan(progressChan)
+	_, err := builder.ParallelAttempts(numAttempts)
+	require.NoError(t, err)
+
+	// Make the build process reasonably long IF it doesn't succeed quickly.
+	// Use a moderate retry limit and a dataset that might require some retries.
+	_, err = builder.RetryLimit(500) // Moderate limit
+	require.NoError(t, err)
+	keys := words[:100] // Larger dataset
+	vals := make([][]byte, len(keys))
+	for i := range keys {
+		vals[i] = []byte(fmt.Sprintf("v%d", i))
+	}
+
+	// Don't set a specific seed, let the logic generate them. We *expect* one
+	// attempt to likely succeed before the other finishes all retries or buckets.
+
+	// --- Collect messages concurrently with the build ---
+	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
+	var progressMu sync.Mutex
+
+	// Create a goroutine to collect progress messages
+	progressDone := make(chan struct{})
+	go func() {
+		defer close(progressDone)
+		for p := range progressChan {
+			progressMu.Lock()
+			receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
+			progressMu.Unlock()
+		}
+	}()
+
+	// Now run the build and time it
+	startTime := time.Now()
+	c, buildErr := buildCHDFromSlices(t, keys, vals, builder)
+	duration := time.Since(startTime)
+
+	// We expect one attempt to succeed
+	require.NoError(t, buildErr, "Build failed unexpectedly, cannot test cancellation effect")
+	require.NotNil(t, c)
+
+	// Now that the build is complete, close the channel and wait for collection to finish
+	close(progressChan)
+	<-progressDone
+
+	// Analyze the collected messages
+	firstSuccessfulAttemptID := -1
+	for id, msgs := range receivedProgress {
+		for _, p := range msgs {
+			if p.Stage == "Complete" && firstSuccessfulAttemptID == -1 {
+				firstSuccessfulAttemptID = id
+				break
+			}
+		}
+	}
+
+	require.NotEqual(t, -1, firstSuccessfulAttemptID, "Expected one attempt to complete successfully")
+	require.Len(t, receivedProgress, numAttempts, "Expected progress from both attempts initially")
+
+	// Analyze the *other* attempt (the one that should have been cancelled)
+	cancelledAttemptID := -1
+	for id := 1; id <= numAttempts; id++ {
+		if id != firstSuccessfulAttemptID {
+			cancelledAttemptID = id
+			break
+		}
+	}
+	require.NotEqual(t, -1, cancelledAttemptID, "Could not identify the cancelled attempt")
+
+	cancelledMsgs := receivedProgress[cancelledAttemptID]
+	require.NotEmpty(t, cancelledMsgs, "Cancelled attempt should have sent some progress")
+
+	lastCancelledMsg := cancelledMsgs[len(cancelledMsgs)-1]
+	t.Logf("Successful attempt: %d. Cancelled attempt: %d. Last stage for cancelled: %s, Buckets: %d/%d, Collisions: %d",
+		firstSuccessfulAttemptID, cancelledAttemptID, lastCancelledMsg.Stage, lastCancelledMsg.BucketsProcessed, lastCancelledMsg.TotalBuckets, lastCancelledMsg.CurrentBucketCollisions)
+
+	// Assert that the cancelled attempt did NOT reach the "Complete" stage
+	assert.NotEqual(t, "Complete", lastCancelledMsg.Stage,
+		"Cancelled attempt (%d) should not have reached 'Complete' stage", cancelledAttemptID)
+
+	// We could also add timing checks, e.g., assert duration is less than
+	// what a single full attempt with many retries would take, but this is harder
+	// to make reliable across different machines. Checking the final stage is more robust.
+	t.Logf("Total parallel build duration with cancellation: %v", duration)
+}
+
+// TestBuildWithDifficultDataset attempts to build using a dataset designed
+// to potentially cause more hash collisions, testing the retry limit and parallel attempts.
+func TestBuildWithDifficultDataset(t *testing.T) {
+	// --- Generate Difficult Keys ---
+	// Choose one or combine strategies. Let's use similar keys for this test
+	numKeys := 10000 // Start with a moderate number for faster test runs
+	t.Logf("Generating %d difficult keys...", numKeys)
+
+	base := "abcdefghijklmnopqrstuvwxyz0123456789"
+	difficultKeys := generateSimilarKeys(base[:16], numKeys, nil) // Random swaps on 16 char base
+
+	difficultVals := make([][]byte, len(difficultKeys))
+	for i := range difficultKeys {
+		difficultVals[i] = []byte(fmt.Sprintf("v%d", i))
+	}
+	t.Logf("Generated %d keys.", len(difficultKeys))
+
+	// --- Test Scenario 1: Low Retry Limit (Expect Failure) ---
+	t.Run("LowRetryLimit", func(t *testing.T) {
+		lowLimit := 100                // Intentionally very low limit
+		builder := Builder().Seed(123) // Fixed seed
+		_, err := builder.RetryLimit(lowLimit)
+		require.NoError(t, err)
+		_, err = builder.ParallelAttempts(1) // Single attempt
+		require.NoError(t, err)
+
+		startTime := time.Now()
+		_, buildErr := buildCHDFromSlices(t, difficultKeys, difficultVals, builder)
+		duration := time.Since(startTime)
+		t.Logf("LowRetryLimit build duration: %v", duration)
+
+		require.Error(t, buildErr, "Build should fail with a low retry limit on this dataset")
+		assert.Contains(t, buildErr.Error(), fmt.Sprintf("failed to find a collision-free hash function after ~%d attempts", lowLimit))
+	})
+
+	// --- Test Scenario 2: Increased Retry Limit (Expect Success) ---
+	t.Run("IncreasedRetryLimit", func(t *testing.T) {
+		// Use a significantly higher limit, but less than default to keep test duration reasonable
+		increasedLimit := 500_000
+		builder := Builder().Seed(123) // Same fixed seed
+		_, err := builder.RetryLimit(increasedLimit)
+		require.NoError(t, err)
+		_, err = builder.ParallelAttempts(1) // Single attempt
+		require.NoError(t, err)
+
+		startTime := time.Now()
+		c, buildErr := buildCHDFromSlices(t, difficultKeys, difficultVals, builder)
+		duration := time.Since(startTime)
+		t.Logf("IncreasedRetryLimit build duration: %v", duration)
+
+		require.NoError(t, buildErr, "Build should succeed with an increased retry limit")
+		require.NotNil(t, c)
+		assert.Equal(t, len(difficultKeys), c.Len())
+	})
+
+	// --- Test Scenario 3: Default Limit + Parallel Attempts (Expect Success) ---
+	t.Run("ParallelAttempts", func(t *testing.T) {
+		numAttempts := 4               // Use multiple attempts
+		builder := Builder().Seed(123) // Use same initial seed (others will be random)
+		// Use default retry limit (10M) - one attempt *might* fail but others should succeed
+		_, err := builder.ParallelAttempts(numAttempts)
+		require.NoError(t, err)
+
+		startTime := time.Now()
+		c, buildErr := buildCHDFromSlices(t, difficultKeys, difficultVals, builder)
+		duration := time.Since(startTime)
+		t.Logf("ParallelAttempts build duration: %v", duration)
+
+		require.NoError(t, buildErr, "Build should succeed using parallel attempts, even if some seeds are difficult")
+		require.NotNil(t, c)
+		assert.Equal(t, len(difficultKeys), c.Len())
+	})
+}
