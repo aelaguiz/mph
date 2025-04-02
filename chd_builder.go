@@ -343,7 +343,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 // buildInternal performs a single attempt to build the CHD table using a specific seed.
 // buildInternal performs a single attempt to build the CHD table using a specific seed.
 // It checks the provided context for cancellation requests.
-func (b *CHDBuilder) buildInternal(ctx context.Context, buildSeed int64, attemptID int) (*CHD, error) {
+func (b *CHDBuilder) buildInternal(ctx context.Context, buildSeed int64, attemptID int) (finalCHD *CHD, finalErr error) {
 	// Use named return values
 	
 	// Check for cancellation at the very beginning
