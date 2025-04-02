@@ -477,11 +477,14 @@ nextBucket:
 	default:
 	}
 
+	// Diagnostic logging to confirm "Complete" message is being sent
+	fmt.Printf("DEBUG: Sending 'Complete' message for attempt ID %d\n", attemptID)
 	b.sendProgress(BuildProgress{
 		BucketsProcessed: totalBuckets,
 		TotalBuckets:     totalBuckets,
 		Stage:            "Complete", // Final status
 	}, attemptID)
+	fmt.Printf("DEBUG: Sent 'Complete' message for attempt ID %d\n", attemptID)
 
 	return &CHD{
 		r:       hasher.r,

@@ -638,9 +638,10 @@ func TestBuildParallelExtensive(t *testing.T) {
 	startTime = time.Now()
 	go func() {
 		builtCHD, err = buildCHDFromSlices(t, keys, vals, builder)
-		// Close progressChan *after* build is fully complete
+		// Signal build completion first
+		buildDone <- err
+		// THEN close progressChan to signal the reader there are no more messages
 		close(progressChan)
-		buildDone <- err // Signal build completion status
 	}()
 
 	// Wait for build to finish
