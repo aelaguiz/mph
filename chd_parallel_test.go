@@ -461,8 +461,8 @@ func TestBuildParallelReturnsOnFirstSuccess(t *testing.T) {
 	require.NoError(t, buildErr, "Build failed unexpectedly, cannot test cancellation effect")
 	require.NotNil(t, c)
 
-	// Now that the build is complete, close the channel and wait for collection to finish
-	close(progressChan)
+	// Now that the build is complete, wait for collection to finish
+	// (channel is closed by the builder after all workers complete)
 	<-progressDone
 
 	// Analyze the collected messages
@@ -525,8 +525,8 @@ func TestBuildParallelContextCancellation(t *testing.T) {
 	require.NoError(t, buildErr, "Build failed unexpectedly, cannot test cancellation effect")
 	require.NotNil(t, c)
 
-	// Now that the build is complete, close the channel and wait for collection to finish
-	close(progressChan)
+	// Now that the build is complete, wait for collection to finish
+	// (channel is closed by the builder after all workers complete)
 	<-progressDone
 
 	// Analyze the collected messages
