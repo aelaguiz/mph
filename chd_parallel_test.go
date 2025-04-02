@@ -312,7 +312,10 @@ func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
 	var buildErr error
 	var errMu sync.Mutex // Mutex to protect access to buildErr
 	go func() {
-		_, buildErr = buildCHDFromSlices(t, keys, vals, b)
+		_, err := buildCHDFromSlices(t, keys, vals, b)
+		errMu.Lock()
+		buildErr = err
+		errMu.Unlock()
 		close(buildDone)
 	}()
 
