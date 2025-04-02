@@ -922,6 +922,151 @@ func TestBuildParallelContextCancellation(t *testing.T) {
 
 // --- End of New Phase 6c Tests ---
 
+// Helper function to generate keys with sequential prefixes
+func generateSequentialKeys(count int, prefix string) [][]byte {
+	keys := make([][]byte, count)
+	for i := 0; i < count; i++ {
+		key := fmt.Sprintf("%s-%08d", prefix, i+1) // e.g., data-00000001
+		keys[i] = []byte(key)
+	}
+	return keys
+}
+
+// Helper function to generate keys that are similar variations of a base string
+func generateSimilarKeys(baseKey string, count int, swapPositions [][2]int) [][]byte {
+	keysMap := make(map[string]bool) // Use map to ensure uniqueness
+	baseBytes := []byte(baseKey)
+	keysMap[baseKey] = true
+
+	rng := rand.New(rand.NewSource(time.Now().UnixNano())) // For random swaps if needed
+
+	for len(keysMap) < count {
+		// Create variation
+		newKeyBytes := make([]byte, len(baseBytes))
+		copy(newKeyBytes, baseBytes)
+
+		// Method 1: Predefined swaps (limited variations)
+		if len(swapPositions) > 0 {
+			idx := rng.Intn(len(swapPositions))
+			p1, p2 := swapPositions[idx][0], swapPositions[idx][1]
+			if p1 < len(newKeyBytes) && p2 < len(newKeyBytes) {
+				newKeyBytes[p1], newKeyBytes[p2] = newKeyBytes[p2], newKeyBytes[p1]
+			}
+		} else {
+			// Method 2: Random swaps (more variations, less predictable)
+			if len(newKeyBytes) >= 2 {
+				p1 := rng.Intn(len(newKeyBytes))
+				p2 := rng.Intn(len(newKeyBytes))
+				if p1 != p2 {
+					newKeyBytes[p1], newKeyBytes[p2] = newKeyBytes[p2], newKeyBytes[p1]
+				}
+			}
+		}
+		keysMap[string(newKeyBytes)] = true
+	}
+
+	keys := make([][]byte, 0, len(keysMap))
+	for k := range keysMap {
+		keys = append(keys, []byte(k))
+	}
+	return keys
+}
+
+// Helper function to generate keys with low entropy (limited character set)
+func generateLowEntropyKeys(count int, length int, alphabet string) [][]byte {
+	keysMap := make(map[string]bool)
+	alphabetBytes := []byte(alphabet)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	for len(keysMap) < count {
+		keyBytes := make([]byte, length)
+		for i := 0; i < length; i++ {
+			keyBytes[i] = alphabetBytes[rng.Intn(len(alphabetBytes))]
+		}
+		keysMap[string(keyBytes)] = true
+	}
+
+	keys := make([][]byte, 0, len(keysMap))
+	for k := range keysMap {
+		keys = append(keys, []byte(k))
+	}
+	return keys
+}
+
+// TestBuildWithDifficultDataset attempts to build using a dataset designed
+// to potentially cause more hash collisions, testing the retry limit and parallel attempts.
+func TestBuildWithDifficultDataset(t *testing.T) {
+	// --- Generate Difficult Keys ---
+	// Choose one or combine strategies. Let's use similar keys for this test
+	numKeys := 10000 // Start with a moderate number for faster test runs
+	t.Logf("Generating %d difficult keys...", numKeys)
+	
+	base := "abcdefghijklmnopqrstuvwxyz0123456789"
+	difficultKeys := generateSimilarKeys(base[:16], numKeys, nil) // Random swaps on 16 char base
+	
+	difficultVals := make([][]byte, len(difficultKeys))
+	for i := range difficultKeys {
+		difficultVals[i] = []byte(fmt.Sprintf("v%d", i))
+	}
+	t.Logf("Generated %d keys.", len(difficultKeys))
+
+	// --- Test Scenario 1: Low Retry Limit (Expect Failure) ---
+	t.Run("LowRetryLimit", func(t *testing.T) {
+		lowLimit := 100 // Intentionally very low limit
+		builder := Builder().Seed(123) // Fixed seed
+		_, err := builder.RetryLimit(lowLimit)
+		require.NoError(t, err)
+		_, err = builder.ParallelAttempts(1) // Single attempt
+		require.NoError(t, err)
+
+		startTime := time.Now()
+		_, buildErr := buildCHDFromSlices(t, difficultKeys, difficultVals, builder)
+		duration := time.Since(startTime)
+		t.Logf("LowRetryLimit build duration: %v", duration)
+
+		require.Error(t, buildErr, "Build should fail with a low retry limit on this dataset")
+		assert.Contains(t, buildErr.Error(), fmt.Sprintf("failed to find a collision-free hash function after ~%d attempts", lowLimit))
+	})
+
+	// --- Test Scenario 2: Increased Retry Limit (Expect Success) ---
+	t.Run("IncreasedRetryLimit", func(t *testing.T) {
+		// Use a significantly higher limit, but less than default to keep test duration reasonable
+		increasedLimit := 500_000
+		builder := Builder().Seed(123) // Same fixed seed
+		_, err := builder.RetryLimit(increasedLimit)
+		require.NoError(t, err)
+		_, err = builder.ParallelAttempts(1) // Single attempt
+		require.NoError(t, err)
+
+		startTime := time.Now()
+		c, buildErr := buildCHDFromSlices(t, difficultKeys, difficultVals, builder)
+		duration := time.Since(startTime)
+		t.Logf("IncreasedRetryLimit build duration: %v", duration)
+
+		require.NoError(t, buildErr, "Build should succeed with an increased retry limit")
+		require.NotNil(t, c)
+		assert.Equal(t, len(difficultKeys), c.Len())
+	})
+
+	// --- Test Scenario 3: Default Limit + Parallel Attempts (Expect Success) ---
+	t.Run("ParallelAttempts", func(t *testing.T) {
+		numAttempts := 4 // Use multiple attempts
+		builder := Builder().Seed(123) // Use same initial seed (others will be random)
+		// Use default retry limit (10M) - one attempt *might* fail but others should succeed
+		_, err := builder.ParallelAttempts(numAttempts)
+		require.NoError(t, err)
+
+		startTime := time.Now()
+		c, buildErr := buildCHDFromSlices(t, difficultKeys, difficultVals, builder)
+		duration := time.Since(startTime)
+		t.Logf("ParallelAttempts build duration: %v", duration)
+
+		require.NoError(t, buildErr, "Build should succeed using parallel attempts, even if some seeds are difficult")
+		require.NotNil(t, c)
+		assert.Equal(t, len(difficultKeys), c.Len())
+	})
+}
+
 func BenchmarkBuiltinMap(b *testing.B) {
 	keys := []string{}
 	d := map[string]string{}
