@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"reflect" // Added for diagnostics
 	"runtime"
@@ -663,7 +664,7 @@ func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
 	// Read progress messages until build is done OR we see a "Complete" stage
 	// Use a timeout to prevent hanging if "Complete" is somehow missed.
 	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
-	readTimeout := time.After(5 * time.Second) // Safety timeout
+	readTimeout := time.After(5 * time.Second)        // Safety timeout
 	keepReading := true
 
 	for keepReading {
@@ -696,7 +697,9 @@ func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
 			for {
 				select {
 				case p, ok := <-progressChan:
-					if !ok { break drainLoop } // Channel closed
+					if !ok {
+						break drainLoop
+					} // Channel closed
 					receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
 				case <-drainTimeout:
 					break drainLoop
@@ -709,9 +712,9 @@ func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
 	}
 
 	// Now analyze the collected messages
-	firstSuccessfulAttemptID := -1 // Reset before analysis
+	firstSuccessfulAttemptID := -1              // Reset before analysis
 	maxProcessedPerAttempt := make(map[int]int) // Reset before analysis
-	
+
 	// Find the actual first success ID from the collected messages
 	for id, msgs := range receivedProgress {
 		for _, p := range msgs {
@@ -723,7 +726,7 @@ func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
 			}
 		}
 	}
-	
+
 	require.NoError(t, buildErr) // Verify build succeeded
 
 	assert.NotEmpty(t, receivedProgress, "Should receive some progress messages")
@@ -846,7 +849,9 @@ func TestBuildParallelContextCancellation(t *testing.T) {
 	require.NoError(t, err)
 	keys := words[:100] // Larger dataset
 	vals := make([][]byte, len(keys))
-	for i := range keys { vals[i] = []byte(fmt.Sprintf("v%d",i)) }
+	for i := range keys {
+		vals[i] = []byte(fmt.Sprintf("v%d", i))
+	}
 
 	// Don't set a specific seed, let the logic generate them. We *expect* one
 	// attempt to likely succeed before the other finishes all retries or buckets.
@@ -854,7 +859,7 @@ func TestBuildParallelContextCancellation(t *testing.T) {
 	// --- Collect messages concurrently with the build ---
 	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
 	var progressMu sync.Mutex
-	
+
 	// Create a goroutine to collect progress messages
 	progressDone := make(chan struct{})
 	go func() {
@@ -865,20 +870,20 @@ func TestBuildParallelContextCancellation(t *testing.T) {
 			progressMu.Unlock()
 		}
 	}()
-	
+
 	// Now run the build and time it
 	startTime := time.Now()
 	c, buildErr := buildCHDFromSlices(t, keys, vals, builder)
 	duration := time.Since(startTime)
-	
+
 	// We expect one attempt to succeed
 	require.NoError(t, buildErr, "Build failed unexpectedly, cannot test cancellation effect")
 	require.NotNil(t, c)
-	
+
 	// Now that the build is complete, close the channel and wait for collection to finish
 	close(progressChan)
 	<-progressDone
-	
+
 	// Analyze the collected messages
 	firstSuccessfulAttemptID := -1
 	for id, msgs := range receivedProgress {
@@ -1000,10 +1005,10 @@ func TestBuildWithDifficultDataset(t *testing.T) {
 	// Choose one or combine strategies. Let's use similar keys for this test
 	numKeys := 10000 // Start with a moderate number for faster test runs
 	t.Logf("Generating %d difficult keys...", numKeys)
-	
+
 	base := "abcdefghijklmnopqrstuvwxyz0123456789"
 	difficultKeys := generateSimilarKeys(base[:16], numKeys, nil) // Random swaps on 16 char base
-	
+
 	difficultVals := make([][]byte, len(difficultKeys))
 	for i := range difficultKeys {
 		difficultVals[i] = []byte(fmt.Sprintf("v%d", i))
@@ -1012,7 +1017,7 @@ func TestBuildWithDifficultDataset(t *testing.T) {
 
 	// --- Test Scenario 1: Low Retry Limit (Expect Failure) ---
 	t.Run("LowRetryLimit", func(t *testing.T) {
-		lowLimit := 100 // Intentionally very low limit
+		lowLimit := 100                // Intentionally very low limit
 		builder := Builder().Seed(123) // Fixed seed
 		_, err := builder.RetryLimit(lowLimit)
 		require.NoError(t, err)
@@ -1050,7 +1055,7 @@ func TestBuildWithDifficultDataset(t *testing.T) {
 
 	// --- Test Scenario 3: Default Limit + Parallel Attempts (Expect Success) ---
 	t.Run("ParallelAttempts", func(t *testing.T) {
-		numAttempts := 4 // Use multiple attempts
+		numAttempts := 4               // Use multiple attempts
 		builder := Builder().Seed(123) // Use same initial seed (others will be random)
 		// Use default retry limit (10M) - one attempt *might* fail but others should succeed
 		_, err := builder.ParallelAttempts(numAttempts)
