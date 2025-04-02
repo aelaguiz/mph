@@ -95,7 +95,7 @@ func TestBuildParallelBasicSuccess(t *testing.T) {
 	// For this test we'll use a small sample dataset defined in main test file
 	keys := make([][]byte, 0)
 	vals := make([][]byte, 0)
-	
+
 	sampleData := map[string]string{
 		"one":   "1",
 		"two":   "2",
@@ -105,7 +105,7 @@ func TestBuildParallelBasicSuccess(t *testing.T) {
 		"six":   "6",
 		"seven": "7",
 	}
-	
+
 	for k, v := range sampleData {
 		keys = append(keys, []byte(k))
 		vals = append(vals, []byte(v))
@@ -274,8 +274,10 @@ func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
 func TestBuildParallelReturnsOnFirstSuccess(t *testing.T) {
 	keys := words[:100] // Larger dataset
 	vals := make([][]byte, len(keys))
-	for i := range keys { vals[i] = []byte(fmt.Sprintf("v%d",i)) }
-	
+	for i := range keys {
+		vals[i] = []byte(fmt.Sprintf("v%d", i))
+	}
+
 	// Don't set a specific seed, let the logic generate them. We *expect* one
 	// attempt to likely succeed before the other finishes all retries or buckets.
 
@@ -295,7 +297,7 @@ func TestBuildParallelReturnsOnFirstSuccess(t *testing.T) {
 	// --- Collect messages concurrently with the build ---
 	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
 	var progressMu sync.Mutex
-	
+
 	// Create a goroutine to collect progress messages
 	progressDone := make(chan struct{})
 	go func() {
@@ -306,20 +308,20 @@ func TestBuildParallelReturnsOnFirstSuccess(t *testing.T) {
 			progressMu.Unlock()
 		}
 	}()
-	
+
 	// Now run the build and time it
 	startTime := time.Now()
 	c, buildErr := buildCHDFromSlices(t, keys, vals, builder)
 	duration := time.Since(startTime)
-	
+
 	// We expect one attempt to succeed
 	require.NoError(t, buildErr, "Build failed unexpectedly, cannot test cancellation effect")
 	require.NotNil(t, c)
-	
+
 	// Now that the build is complete, close the channel and wait for collection to finish
 	close(progressChan)
 	<-progressDone
-	
+
 	// Analyze the collected messages
 	firstSuccessfulAttemptID := -1
 	for id, msgs := range receivedProgress {
