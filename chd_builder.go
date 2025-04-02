@@ -445,6 +445,13 @@ nextBucket:
 	// println("keys:", len(table))
 	// println("hash functions:", len(hasher.r))
 
+	// Check for cancellation before packing data
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
 	b.sendProgress(BuildProgress{
 		BucketsProcessed: totalBuckets, // All buckets processed
 		TotalBuckets:     totalBuckets,
@@ -461,6 +468,13 @@ nextBucket:
 		valuelist[i].start = uint64(buf.Len())
 		buf.Write(values[i])
 		valuelist[i].end = uint64(buf.Len())
+	}
+
+	// Check for cancellation just before sending the final "Complete" message
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err() // Don't send "Complete" if cancelled
+	default:
 	}
 
 	b.sendProgress(BuildProgress{
