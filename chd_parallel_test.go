@@ -3,6 +3,7 @@ package mph
 import (
 	"fmt"
 	"math/rand"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -59,6 +60,149 @@ func generateSimilarKeys(baseKey string, count int, swapPositions [][2]int) [][]
 		keys = append(keys, []byte(k))
 	}
 	return keys
+}
+
+// Helper function to generate keys in parallel that are similar variations of a base string
+func generateSimilarKeysParallel(baseKey string, count int, swapPositions [][2]int, numWorkers int) [][]byte {
+	if numWorkers <= 0 {
+		numWorkers = runtime.NumCPU() // Default to number of CPUs
+	}
+
+	// Create a thread-safe map to ensure uniqueness
+	var keysMu sync.Mutex
+	keysMap := make(map[string]bool, count)
+	keysMap[baseKey] = true // Add base key
+
+	// To keep track of when workers are done
+	var wg sync.WaitGroup
+
+	// Calculate keys per worker
+	keysPerWorker := (count - 1) / numWorkers // -1 because we already have baseKey
+	if keysPerWorker < 1 {
+		keysPerWorker = 1
+	}
+
+	// Channel to collect keys from workers (with some buffer)
+	resultChan := make(chan []byte, numWorkers*10)
+
+	// Launch workers
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			// Each worker gets its own RNG
+			seed := time.Now().UnixNano() + int64(workerID)
+			rng := rand.New(rand.NewSource(seed))
+
+			// How many keys this worker should try to generate
+			targetKeys := keysPerWorker
+			if workerID == numWorkers-1 {
+				// Last worker picks up any remainder
+				targetKeys = count - 1 - (keysPerWorker * (numWorkers - 1))
+			}
+
+			// Generate keys until we have enough unique ones
+			baseBytes := []byte(baseKey)
+			keysGenerated := 0
+			attempts := 0
+			maxAttempts := targetKeys * 20 // Avoid infinite loops
+
+			for keysGenerated < targetKeys && attempts < maxAttempts {
+				attempts++
+
+				// Create variation
+				newKeyBytes := make([]byte, len(baseBytes))
+				copy(newKeyBytes, baseBytes)
+
+				// Method 1: Predefined swaps (limited variations)
+				if len(swapPositions) > 0 {
+					idx := rng.Intn(len(swapPositions))
+					p1, p2 := swapPositions[idx][0], swapPositions[idx][1]
+					if p1 < len(newKeyBytes) && p2 < len(newKeyBytes) {
+						newKeyBytes[p1], newKeyBytes[p2] = newKeyBytes[p2], newKeyBytes[p1]
+					}
+				} else {
+					// Method 2: Random swaps (more variations, less predictable)
+					if len(newKeyBytes) >= 2 {
+						p1 := rng.Intn(len(newKeyBytes))
+						p2 := rng.Intn(len(newKeyBytes))
+						if p1 != p2 {
+							newKeyBytes[p1], newKeyBytes[p2] = newKeyBytes[p2], newKeyBytes[p1]
+						}
+					}
+				}
+
+				// Check if this key is unique (not in map yet)
+				newKey := string(newKeyBytes)
+				keysMu.Lock()
+				if !keysMap[newKey] {
+					keysMap[newKey] = true
+					keysMu.Unlock()
+					keysGenerated++
+					resultChan <- newKeyBytes
+				} else {
+					keysMu.Unlock()
+				}
+			}
+		}(i)
+	}
+
+	// Close the result channel when all workers complete
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect all generated keys
+	keys := make([][]byte, 0, count)
+	keys = append(keys, []byte(baseKey)) // Add the base key first
+
+	for key := range resultChan {
+		keys = append(keys, key)
+		if len(keys) >= count {
+			break
+		}
+	}
+
+	return keys
+}
+
+// Helper function to generate values in parallel for the keys
+func generateValuesParallel(count int, numWorkers int) [][]byte {
+	if numWorkers <= 0 {
+		numWorkers = runtime.NumCPU() // Default to number of CPUs
+	}
+
+	vals := make([][]byte, count)
+	var wg sync.WaitGroup
+
+	keysPerWorker := count / numWorkers
+	if keysPerWorker < 1 {
+		keysPerWorker = 1
+	}
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			start := workerID * keysPerWorker
+			end := start + keysPerWorker
+
+			// Last worker takes any remainder
+			if workerID == numWorkers-1 {
+				end = count
+			}
+
+			for j := start; j < end && j < count; j++ {
+				vals[j] = []byte(fmt.Sprintf("v%d", j))
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	return vals
 }
 
 // Helper function to generate keys with low entropy (limited character set)
@@ -438,13 +582,21 @@ func TestBuildWithDifficultDataset(t *testing.T) {
 	t.Logf("Generating %d difficult keys...", numKeys)
 
 	base := "abcdefghijklmnopqrstuvwxyz0123456789"
-	difficultKeys := generateSimilarKeys(base[:16], numKeys, nil) // Random swaps on 16 char base
+	
+	// Use parallel generation with number of workers based on CPU count
+	numWorkers := runtime.NumCPU()
+	t.Logf("Using %d workers for parallel key generation", numWorkers)
+	
+	startTime := time.Now()
+	difficultKeys := generateSimilarKeysParallel(base[:16], numKeys, nil, numWorkers) // Random swaps on 16 char base
+	keyGenDuration := time.Since(startTime)
 
-	difficultVals := make([][]byte, len(difficultKeys))
-	for i := range difficultKeys {
-		difficultVals[i] = []byte(fmt.Sprintf("v%d", i))
-	}
-	t.Logf("Generated %d keys.", len(difficultKeys))
+	// Generate values in parallel too
+	startTime = time.Now()
+	difficultVals := generateValuesParallel(len(difficultKeys), numWorkers)
+	valGenDuration := time.Since(startTime)
+	
+	t.Logf("Generated %d keys in %v (keys) and %v (values)", len(difficultKeys), keyGenDuration, valGenDuration)
 
 	// --- Test Scenario 1: Low Retry Limit (Expect Failure) ---
 	t.Run("LowRetryLimit", func(t *testing.T) {
