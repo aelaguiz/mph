@@ -249,7 +249,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 			attemptID := attemptIdx + 1 // 1-based ID
 
 			// Pass the context to the internal build function
-			chdResult, errResult := b.buildInternal(context.Background(), seed, attemptID)
+			chdResult, errResult := b.buildInternal(ctx, seed, attemptID)
 
 			// Send result regardless of context cancellation state for now.
 			// The receiver loop will handle ignoring late results.
