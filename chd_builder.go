@@ -532,15 +532,13 @@ nextBucket:
 	}
 	b.sendProgress(completeProgress, attemptID)
 	
-	finalCHD = &CHD{
+	return &CHD{
 		r:       hasher.r,
 		indices: indices,
 		mmap:    buf.Bytes(),
 		keys:    keylist,
 		values:  valuelist,
-	}
-	finalErr = nil
-	return
+	}, nil
 }
 
 func newCHDHasher(size, buckets uint64, seed int64, seeded bool) *chdHasher {
