@@ -1,4 +1,4 @@
-module github.com/alecthomas/mph
+module github.com/aelaguiz/mph
 
 go 1.21.6
 
