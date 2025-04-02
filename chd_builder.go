@@ -470,12 +470,8 @@ nextBucket:
 		valuelist[i].end = uint64(buf.Len())
 	}
 
-	// Check for cancellation just before sending the final "Complete" message
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err() // Don't send "Complete" if cancelled
-	default:
-	}
+	// If we got here, packing is done. Send Complete and return success.
+	// Do NOT check for cancellation here, otherwise the winning goroutine might fail to report success.
 
 	// Diagnostic logging to confirm "Complete" message is being sent
 	fmt.Printf("DEBUG: Sending 'Complete' message for attempt ID %d\n", attemptID)

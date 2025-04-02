@@ -681,10 +681,9 @@ func TestBuildParallelExtensive(t *testing.T) {
 	// Ideally, we see progress from multiple attempts if the first didn't succeed instantly
 	t.Logf("Received progress reports from %d distinct attempts.", len(receivedProgress))
 
-	// Analyze progress to understand what happened, but don't fail the test if "Complete" is missed.
-	winningAttemptID := -1 // ID of the attempt that likely won (reached Packing or Complete)
+	firstSuccessfulAttemptID := -1
 	completedAttempts := 0
-	likelyCancelledAttempts := 0
+	cancelledAttempts := 0
 	maxBucketProcessed := 0 // Track overall progress
 
 	for id, msgs := range receivedProgress {
@@ -701,38 +700,30 @@ func TestBuildParallelExtensive(t *testing.T) {
 
 		// Identify completed or near-completed attempts
 		if lastMsg.Stage == "Complete" {
-			completedAttempts++
-			if winningAttemptID == -1 { // Mark the first one we see as "Complete"
-				winningAttemptID = id
+			// This should be the winner
+			if firstSuccessfulAttemptID == -1 { // Record the first one found
+				firstSuccessfulAttemptID = id
 			}
 			assert.Equal(t, lastMsg.TotalBuckets, lastMsg.BucketsProcessed, "Completed attempt %d should have processed all buckets", id)
-		} else if lastMsg.Stage == "Packing Data" {
-			// If we missed "Complete", consider "Packing Data" as the likely winner
-			if winningAttemptID == -1 {
-				winningAttemptID = id
-			}
+			completedAttempts++ // Count how many *claimed* to complete
 		} else {
-			likelyCancelledAttempts++
+			// Didn't complete
+			cancelledAttempts++
 			t.Logf("Attempt %d likely cancelled (last stage: %s, buckets: %d/%d)", id, lastMsg.Stage, lastMsg.BucketsProcessed, lastMsg.TotalBuckets)
 		}
 	}
-
-	assert.NotEqualf(t, -1, winningAttemptID, "Expected at least one attempt to reach 'Packing Data' or 'Complete' stage (found %d attempts)", len(receivedProgress))
-	assert.LessOrEqualf(t, completedAttempts, 1, "Expected at most one attempt to report 'Complete' stage (found %d)", completedAttempts)
+	
+	assert.NotEqualf(t, -1, firstSuccessfulAttemptID, "Expected one attempt (%d total attempts ran) to complete successfully by reaching 'Complete' stage", len(receivedProgress))
+	assert.Equal(t, 1, completedAttempts, "Expected exactly one attempt to report 'Complete' stage (found %d)", completedAttempts)
 	// Check that if multiple attempts sent progress, some were cancelled
 	if len(receivedProgress) > 1 {
-		// This assertion is still valid: the number of attempts that didn't reach Packing/Complete should match
-		// the number of attempts minus one (the winner)
+		// The number of attempts that didn't complete should match cancelledAttempts
 		expectedCancelled := len(receivedProgress) - completedAttempts
-		if winningAttemptID != -1 && completedAttempts == 0 {
-			// Adjust if the winner only reached "Packing Data"
-			expectedCancelled = len(receivedProgress) - 1
-		}
-		assert.GreaterOrEqual(t, likelyCancelledAttempts, expectedCancelled, "Expected non-winning attempts to be cancelled")
+		assert.GreaterOrEqual(t, cancelledAttempts, expectedCancelled, "Expected non-winning attempts to be cancelled")
 	}
 
 	t.Logf("Analysis complete. Winning attempt: %d. Completed: %d. Cancelled: %d. Max buckets reached by any process: %d",
-		winningAttemptID, completedAttempts, likelyCancelledAttempts, maxBucketProcessed)
+		firstSuccessfulAttemptID, completedAttempts, cancelledAttempts, maxBucketProcessed)
 }
 
 // TestBuildWithDifficultDataset attempts to build using a dataset designed
