@@ -151,29 +151,23 @@ func (b *CHDBuilder) sendProgress(progress BuildProgress, attemptID int) {
 	}
 
 	if b.progressChan != nil {
-		// Log attempt BEFORE trying to send
-		log.Printf("[sendProgress %d] Attempting to send stage '%s' (Buckets: %d/%d, Collisions: %d)",
-			attemptID, progress.Stage, progress.BucketsProcessed, progress.TotalBuckets, progress.CurrentBucketCollisions)
-		
-		// For Complete stage messages, add more detailed logging
+		// For Complete stage messages
 		if progress.Stage == "Complete" {
-			startTime := time.Now()
 			select {
 			case b.progressChan <- progress:
-				duration := time.Since(startTime)
-				log.Printf("[sendProgress %d] Successfully sent 'Complete' stage message after %v", attemptID, duration)
+				// sent successfully
 			default:
-				log.Printf("[sendProgress %d] DROPPED 'Complete' stage message (channel full or closed)", attemptID)
+				// channel full or closed - message dropped
 			}
 			return // Done processing Complete message
 		}
 		
-		// Normal non-Complete messages also get basic logging
+		// Normal non-Complete messages
 		select {
 		case b.progressChan <- progress:
-			log.Printf("[sendProgress %d] Successfully sent stage '%s'", attemptID, progress.Stage)
+			// sent successfully
 		default:
-			log.Printf("[sendProgress %d] DROPPED stage '%s' (channel full or closed)", attemptID, progress.Stage)
+			// channel full or closed - message dropped
 		}
 	}
 }
@@ -233,8 +227,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 		initialSeed = time.Now().UnixNano()
 	}
 
-	log.Printf("[Build] Starting build. ParallelAttempts=%d, SeedSet=%t, InitialSeed=%d", 
-		b.parallelSeedAttempts, b.seedSetByUser, initialSeed)
+	// Starting build with specified parameters
 
 	// --- Single Attempt Path ---
 	if b.parallelSeedAttempts == 1 {
@@ -282,27 +275,21 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 			// Pass the context to the internal build function
 			chdResult, errResult := b.buildInternal(ctx, seed, attemptID)
 
-			// Send result regardless of context cancellation state for now.
-			// The receiver loop will handle ignoring late results.
-			log.Printf("[Build Worker %d] Sending result to resultsChan...", attemptID)
+			// Send result regardless of context cancellation state
 			resultsChan <- buildResult{
 				chd:       chdResult, 
 				err:       errResult,
 				attemptID: attemptID,
 				seed:      seed,
 			}
-			log.Printf("[Build Worker %d] Sent result to resultsChan. (Worker goroutine will exit soon)", attemptID)
 		}(i)
 	}
 	
 	// Only close the progress channel after all workers are done
 	if b.progressChan != nil {
 		go func() {
-			log.Printf("[Progress Closer] Waiting for %d workers via WaitGroup...", numAttempts)
 			workersWg.Wait() // Wait for all buildInternal calls to return
-			log.Printf("[Progress Closer] All workers finished. Closing progress channel.")
 			close(b.progressChan)
-			log.Printf("[Progress Closer] Progress channel closed")
 		}()
 	}
 
@@ -318,8 +305,6 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 				log.Printf("[Build] Results channel closed unexpectedly during receive loop")
 				break // Should not happen if we loop numAttempts times
 			}
-			log.Printf("[Build] Received result from Attempt %d. Success=%t, Err=%v", 
-				result.attemptID, result.err == nil && result.chd != nil, result.err)
 			if result.err == nil && result.chd != nil {
 				// First success!
 				if firstSuccess == nil {
@@ -342,14 +327,11 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 		}
 	}
 
-	log.Printf("[Build] Finished draining results channel")
 	if firstSuccess != nil {
-		log.Printf("[Build] Returning successful CHD.")
 		return firstSuccess, nil // Return the first success we found
 	}
 
 	// If no success was found
-	log.Printf("[Build] All attempts failed. Last error: %v", lastError)
 	if lastError != nil {
 		return nil, fmt.Errorf("all %d parallel build attempts failed, last error: %w", numAttempts, lastError)
 	}
@@ -362,10 +344,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 // buildInternal performs a single attempt to build the CHD table using a specific seed.
 // It checks the provided context for cancellation requests.
 func (b *CHDBuilder) buildInternal(ctx context.Context, buildSeed int64, attemptID int) (*CHD, error) {
-	// Use named return values to facilitate logging before returning
-	defer func() {
-		log.Printf("[buildInternal %d] Returning. err=%v", attemptID, finalErr)
-	}()
+	// Use named return values
 	
 	// Check for cancellation at the very beginning
 	select {
@@ -381,8 +360,6 @@ func (b *CHDBuilder) buildInternal(ctx context.Context, buildSeed int64, attempt
 		m = 1
 	}
 	totalBuckets := int(m) // Store for progress reporting
-	log.Printf("[buildInternal %d] Calculated %d buckets for %d keys (Ratio: %.2f)", 
-		attemptID, totalBuckets, n, b.bucketRatio)
 
 	keys := make([][]byte, n)
 	values := make([][]byte, n)
