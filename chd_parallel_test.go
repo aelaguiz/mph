@@ -310,6 +310,7 @@ func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
 
 	buildDone := make(chan struct{})
 	var buildErr error
+	var errMu sync.Mutex // Mutex to protect access to buildErr
 	go func() {
 		_, buildErr = buildCHDFromSlices(t, keys, vals, b)
 		close(buildDone)
@@ -381,7 +382,9 @@ func TestBuildParallelProgressMultipleAttempts(t *testing.T) {
 		}
 	}
 
+	errMu.Lock()
 	require.NoError(t, buildErr) // Verify build succeeded
+	errMu.Unlock()
 
 	assert.NotEmpty(t, receivedProgress, "Should receive some progress messages")
 	assert.NotEqual(t, -1, firstSuccessfulAttemptID, "At least one attempt should have completed successfully")
