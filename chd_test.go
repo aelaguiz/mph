@@ -851,24 +851,42 @@ func TestBuildParallelContextCancellation(t *testing.T) {
 	// Don't set a specific seed, let the logic generate them. We *expect* one
 	// attempt to likely succeed before the other finishes all retries or buckets.
 
+	// --- Collect messages concurrently with the build ---
+	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
+	var progressMu sync.Mutex
+	
+	// Create a goroutine to collect progress messages
+	progressDone := make(chan struct{})
+	go func() {
+		defer close(progressDone)
+		for p := range progressChan {
+			progressMu.Lock()
+			receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
+			progressMu.Unlock()
+		}
+	}()
+	
+	// Now run the build and time it
 	startTime := time.Now()
 	c, buildErr := buildCHDFromSlices(t, keys, vals, builder)
 	duration := time.Since(startTime)
-
+	
 	// We expect one attempt to succeed
 	require.NoError(t, buildErr, "Build failed unexpectedly, cannot test cancellation effect")
 	require.NotNil(t, c)
-
-	// Read progress messages until channel is closed or we get enough
-	close(progressChan) // Close to drain in the range loop
-
-	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
+	
+	// Now that the build is complete, close the channel and wait for collection to finish
+	close(progressChan)
+	<-progressDone
+	
+	// Analyze the collected messages
 	firstSuccessfulAttemptID := -1
-
-	for p := range progressChan {
-		receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
-		if p.Stage == "Complete" && firstSuccessfulAttemptID == -1 {
-			firstSuccessfulAttemptID = p.AttemptID
+	for id, msgs := range receivedProgress {
+		for _, p := range msgs {
+			if p.Stage == "Complete" && firstSuccessfulAttemptID == -1 {
+				firstSuccessfulAttemptID = id
+				break
+			}
 		}
 	}
 
