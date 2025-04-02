@@ -566,7 +566,7 @@ func TestBuildParallelContextCancellation(t *testing.T) {
 	// We could also add timing checks, e.g., assert duration is less than
 	// what a single full attempt with many retries would take, but this is harder
 	// to make reliable across different machines. Checking the final stage is more robust.
-	t.Logf("Total parallel build duration with cancellation: %v", time.Since(startTime))
+	t.Log("Parallel build with cancellation completed successfully")
 }
 
 // TestBuildWithDifficultDataset attempts to build using a dataset designed
