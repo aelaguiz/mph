@@ -628,9 +628,11 @@ func TestBuildParallelExtensive(t *testing.T) {
 		defer close(readDone)
 		for p := range progressChan {
 			progressMutex.Lock()
+			fmt.Printf("DEBUG: Received progress message: AttemptID=%d, Stage=%s\n", p.AttemptID, p.Stage)
 			receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
 			progressMutex.Unlock()
 		}
+		fmt.Println("DEBUG: Progress reader goroutine finished")
 	}()
 
 	buildDone := make(chan error)
@@ -661,6 +663,18 @@ func TestBuildParallelExtensive(t *testing.T) {
 	// Analyze collected progress
 	progressMutex.Lock() // Lock map for final analysis
 	defer progressMutex.Unlock()
+	
+	// Diagnostic logging to see the final state
+	fmt.Println("DEBUG: Final state of receivedProgress map:")
+	for id, msgs := range receivedProgress {
+		if len(msgs) > 0 {
+			lastMsg := msgs[len(msgs)-1]
+			fmt.Printf("DEBUG:   AttemptID=%d, messages=%d, last stage=%s\n", 
+				id, len(msgs), lastMsg.Stage)
+		} else {
+			fmt.Printf("DEBUG:   AttemptID=%d, no messages\n", id)
+		}
+	}
 
 	require.GreaterOrEqualf(t, len(receivedProgress), 1, "Should have received progress from at least one attempt (got %d)", len(receivedProgress))
 	// Ideally, we see progress from multiple attempts if the first didn't succeed instantly
