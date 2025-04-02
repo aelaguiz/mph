@@ -456,7 +456,6 @@ func TestBuildParallelReturnsOnFirstSuccess(t *testing.T) {
 	// Now run the build and time it
 	startTime := time.Now()
 	c, buildErr := buildCHDFromSlices(t, keys, vals, builder)
-	duration := time.Since(startTime)
 
 	// We expect one attempt to succeed
 	require.NoError(t, buildErr, "Build failed unexpectedly, cannot test cancellation effect")
@@ -570,7 +569,7 @@ func TestBuildParallelContextCancellation(t *testing.T) {
 	// We could also add timing checks, e.g., assert duration is less than
 	// what a single full attempt with many retries would take, but this is harder
 	// to make reliable across different machines. Checking the final stage is more robust.
-	t.Logf("Total parallel build duration with cancellation: %v", duration)
+	t.Logf("Total parallel build duration with cancellation: %v", time.Since(startTime))
 }
 
 // TestBuildWithDifficultDataset attempts to build using a dataset designed
