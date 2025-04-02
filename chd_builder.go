@@ -446,7 +446,8 @@ nextBucket:
 		default:
 		}
 		
-		for coll := 0; coll < b.retryLimit; coll++ {
+		var coll int // Define coll outside the loop so it's in scope after the loop ends
+		for coll = 0; coll < b.retryLimit; coll++ {
 			b.sendProgress(BuildProgress{
 				BucketsProcessed:        i,
 				TotalBuckets:            totalBuckets,
