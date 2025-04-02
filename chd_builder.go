@@ -5,6 +5,7 @@ import (
 	"context" // Added for cancellation
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"sort"
 	"time"
@@ -195,8 +196,10 @@ func tryHash(hasher *chdHasher, seen map[uint64]bool, keys [][]byte, values [][]
 
 // Internal struct to hold results from parallel build attempts
 type buildResult struct {
-	chd *CHD
-	err error
+	chd       *CHD
+	err       error
+	attemptID int  // Add attempt ID for logging correlation
+	seed      int64 // Add seed for logging correlation
 }
 
 // Build constructs the minimal perfect hash table.
@@ -210,6 +213,9 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 	if !b.seedSetByUser {
 		initialSeed = time.Now().UnixNano()
 	}
+
+	log.Printf("[Build] Starting build. ParallelAttempts=%d, SeedSet=%t, InitialSeed=%d", 
+		b.parallelSeedAttempts, b.seedSetByUser, initialSeed)
 
 	// --- Single Attempt Path ---
 	if b.parallelSeedAttempts == 1 {
@@ -249,11 +255,18 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 			attemptID := attemptIdx + 1 // 1-based ID
 
 			// Pass the context to the internal build function
+			log.Printf("[Build Worker %d] Starting buildInternal with seed %d", attemptID, seed)
 			chdResult, errResult := b.buildInternal(ctx, seed, attemptID)
+			log.Printf("[Build Worker %d] buildInternal finished. err=%v", attemptID, errResult)
 
 			// Send result regardless of context cancellation state for now.
 			// The receiver loop will handle ignoring late results.
-			resultsChan <- buildResult{chd: chdResult, err: errResult}
+			resultsChan <- buildResult{
+				chd:       chdResult, 
+				err:       errResult,
+				attemptID: attemptID,
+				seed:      seed,
+			}
 		}(i)
 	}
 
@@ -265,11 +278,15 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 	for i := 0; i < numAttempts; i++ { // Loop exactly numAttempts times to collect all results
 		select {
 		case result := <-resultsChan:
+			log.Printf("[Build] Received result from Attempt %d. Success=%t, Err=%v", 
+				result.attemptID, result.err == nil && result.chd != nil, result.err)
 			if result.err == nil && result.chd != nil {
 				// First success!
 				if firstSuccess == nil {
+					log.Printf("[Build] First success from Attempt %d. Cancelling others.", result.attemptID)
 					firstSuccess = result.chd
 					cancel() // Signal other goroutines to stop (they might not react yet in 6b)
+					log.Printf("[Build] Cancel() called.")
 					// Note: We still loop numAttempts times to drain the channel,
 					// but we've captured the first success.
 				}
@@ -288,10 +305,12 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 	}
 
 	if firstSuccess != nil {
+		log.Printf("[Build] Returning successful CHD.")
 		return firstSuccess, nil // Return the first success we found
 	}
 
 	// If no success was found
+	log.Printf("[Build] All attempts failed. Last error: %v", lastError)
 	if lastError != nil {
 		return nil, fmt.Errorf("all %d parallel build attempts failed, last error: %w", numAttempts, lastError)
 	}
@@ -303,11 +322,17 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 // buildInternal performs a single attempt to build the CHD table using a specific seed.
 // buildInternal performs a single attempt to build the CHD table using a specific seed.
 // It checks the provided context for cancellation requests.
-func (b *CHDBuilder) buildInternal(ctx context.Context, buildSeed int64, attemptID int) (*CHD, error) {
+func (b *CHDBuilder) buildInternal(ctx context.Context, buildSeed int64, attemptID int) (finalCHD *CHD, finalErr error) {
+	// Use named return values to facilitate logging before returning
+	defer func() {
+		log.Printf("[buildInternal %d] Returning. err=%v", attemptID, finalErr)
+	}()
+	
 	// Check for cancellation at the very beginning
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		finalErr = ctx.Err()
+		return
 	default:
 	}
 	n := uint64(len(b.keys))
@@ -317,6 +342,8 @@ func (b *CHDBuilder) buildInternal(ctx context.Context, buildSeed int64, attempt
 		m = 1
 	}
 	totalBuckets := int(m) // Store for progress reporting
+	log.Printf("[buildInternal %d] Calculated %d buckets for %d keys (Ratio: %.2f)", 
+		attemptID, totalBuckets, n, b.bucketRatio)
 
 	keys := make([][]byte, n)
 	values := make([][]byte, n)
@@ -375,7 +402,8 @@ func (b *CHDBuilder) buildInternal(ctx context.Context, buildSeed int64, attempt
 	// Check for cancellation before starting main loop
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		finalErr = ctx.Err()
+		return
 	default:
 	}
 
@@ -388,7 +416,8 @@ nextBucket:
 		// Check for cancellation at the start of processing each bucket
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			finalErr = ctx.Err()
+			return
 		default:
 		}
 
@@ -412,7 +441,8 @@ nextBucket:
 		// Check for cancellation before entering potentially long retry loop
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			finalErr = ctx.Err()
+			return
 		default:
 		}
 		
@@ -436,19 +466,23 @@ nextBucket:
 		}
 
 		// Failed to find a hash function with no collisions.
-		return nil, fmt.Errorf(
-			"failed to find a collision-free hash function after ~%d attempts, for bucket %d/%d with %d entries: %s",
-			b.retryLimit, i, totalBuckets, len(bucket.keys), &bucket)
+		if coll >= b.retryLimit { // Check if loop finished due to limit
+			finalErr = fmt.Errorf(
+				"failed to find a collision-free hash function after ~%d attempts, for bucket %d/%d with %d entries: %s",
+				b.retryLimit, i, totalBuckets, len(bucket.keys), &bucket)
+			return
+		}
 	}
 
 	// println("max bucket collisions:", collisions)
 	// println("keys:", len(table))
 	// println("hash functions:", len(hasher.r))
 
-	// Check for cancellation before packing data
+	// Check for cancellation *before* starting the packing loop
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		finalErr = ctx.Err()
+		return
 	default:
 	}
 
@@ -472,23 +506,25 @@ nextBucket:
 
 	// If we got here, packing is done. Send Complete and return success.
 	// Do NOT check for cancellation here, otherwise the winning goroutine might fail to report success.
-
-	// Diagnostic logging to confirm "Complete" message is being sent
-	fmt.Printf("DEBUG: Sending 'Complete' message for attempt ID %d\n", attemptID)
+	log.Printf("[buildInternal %d] Packing complete. Sending 'Complete' progress.", attemptID)
+	
 	b.sendProgress(BuildProgress{
 		BucketsProcessed: totalBuckets,
 		TotalBuckets:     totalBuckets,
+		AttemptID:        attemptID,
 		Stage:            "Complete", // Final status
 	}, attemptID)
-	fmt.Printf("DEBUG: Sent 'Complete' message for attempt ID %d\n", attemptID)
 
-	return &CHD{
+	log.Printf("[buildInternal %d] Successfully built CHD.", attemptID)
+	finalCHD = &CHD{
 		r:       hasher.r,
 		indices: indices,
 		mmap:    buf.Bytes(),
 		keys:    keylist,
 		values:  valuelist,
-	}, nil
+	}
+	finalErr = nil
+	return
 }
 
 func newCHDHasher(size, buckets uint64, seed int64, seeded bool) *chdHasher {

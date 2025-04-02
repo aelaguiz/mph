@@ -2,6 +2,7 @@ package mph
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
 	"runtime"
 	"sync"
@@ -626,13 +627,15 @@ func TestBuildParallelExtensive(t *testing.T) {
 
 	go func() {
 		defer close(readDone)
+		log.Printf("[Test Reader] Starting progress reader goroutine")
 		for p := range progressChan {
+			log.Printf("[Test Reader] Received progress message: AttemptID=%d, Stage=%s, Buckets=%d/%d, Collisions=%d",
+				p.AttemptID, p.Stage, p.BucketsProcessed, p.TotalBuckets, p.CurrentBucketCollisions)
 			progressMutex.Lock()
-			fmt.Printf("DEBUG: Received progress message: AttemptID=%d, Stage=%s\n", p.AttemptID, p.Stage)
 			receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
 			progressMutex.Unlock()
 		}
-		fmt.Println("DEBUG: Progress reader goroutine finished")
+		log.Printf("[Test Reader] Progress reader goroutine finished (channel closed)")
 	}()
 
 	buildDone := make(chan error)
@@ -640,16 +643,21 @@ func TestBuildParallelExtensive(t *testing.T) {
 	startTime = time.Now()
 	go func() {
 		builtCHD, err = buildCHDFromSlices(t, keys, vals, builder)
+		log.Printf("[Test Build Goroutine] buildCHDFromSlices completed. err=%v", err)
 		// Signal build completion first
+		log.Printf("[Test Build Goroutine] Sending completion signal on buildDone")
 		buildDone <- err
 		// THEN close progressChan to signal the reader there are no more messages
+		log.Printf("[Test Build Goroutine] Closing progressChan")
 		close(progressChan)
 	}()
 
 	// Wait for build to finish
 	buildErr := <-buildDone
+	log.Printf("[Test Main] Received completion signal from buildDone. err=%v", buildErr)
 	// Wait for reading goroutine to finish processing all messages
 	<-readDone
+	log.Printf("[Test Main] Reader goroutine finished")
 	duration := time.Since(startTime)
 	// --- End Build and Collect Progress ---
 
@@ -666,14 +674,14 @@ func TestBuildParallelExtensive(t *testing.T) {
 	defer progressMutex.Unlock()
 	
 	// Diagnostic logging to see the final state
-	fmt.Println("DEBUG: Final state of receivedProgress map:")
+	log.Printf("[Test Main] Final state of receivedProgress map:")
 	for id, msgs := range receivedProgress {
 		if len(msgs) > 0 {
 			lastMsg := msgs[len(msgs)-1]
-			fmt.Printf("DEBUG:   AttemptID=%d, messages=%d, last stage=%s\n", 
-				id, len(msgs), lastMsg.Stage)
+			log.Printf("[Test Main]   AttemptID=%d, messages=%d, last stage=%s, buckets=%d/%d", 
+				id, len(msgs), lastMsg.Stage, lastMsg.BucketsProcessed, lastMsg.TotalBuckets)
 		} else {
-			fmt.Printf("DEBUG:   AttemptID=%d, no messages\n", id)
+			log.Printf("[Test Main]   AttemptID=%d, no messages", id)
 		}
 	}
 
