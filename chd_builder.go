@@ -151,22 +151,27 @@ func (b *CHDBuilder) sendProgress(progress BuildProgress, attemptID int) {
 	}
 
 	if b.progressChan != nil {
-		// For Complete stage messages, add more logging for troubleshooting
+		// For Complete stage messages, add more detailed logging
 		if progress.Stage == "Complete" {
-			log.Printf("[sendProgress] Attempting to send 'Complete' stage message for AttemptID=%d", attemptID)
+			startTime := time.Now()
+			log.Printf("[sendProgress] Attempting to send 'Complete' stage message for AttemptID=%d at %v", attemptID, startTime)
+			
+			select {
+			case b.progressChan <- progress:
+				duration := time.Since(startTime)
+				log.Printf("[sendProgress] Successfully sent 'Complete' stage message for AttemptID=%d after %v", attemptID, duration)
+			default:
+				log.Printf("[sendProgress] WARNING: Dropped 'Complete' stage message for AttemptID=%d (channel full or closed)", attemptID)
+			}
+			return // Done processing Complete message
 		}
 		
+		// Normal non-Complete messages just use non-blocking send
 		select {
 		case b.progressChan <- progress:
 			// Sent successfully
-			if progress.Stage == "Complete" {
-				log.Printf("[sendProgress] Successfully sent 'Complete' stage message for AttemptID=%d", attemptID)
-			}
 		default:
 			// Channel buffer is full or receiver is not ready; drop progress update
-			if progress.Stage == "Complete" {
-				log.Printf("[sendProgress] WARNING: Dropped 'Complete' stage message for AttemptID=%d (channel full or closed)", attemptID)
-			}
 		}
 	}
 }
@@ -295,11 +300,11 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 	// Only close the progress channel after all workers are done
 	if b.progressChan != nil {
 		go func() {
-			log.Printf("[Build] Starting WaitGroup goroutine to wait for all workers to complete")
+			log.Printf("[Progress Closer] Waiting for %d workers via WaitGroup...", numAttempts)
 			workersWg.Wait() // Wait for all buildInternal calls to return
-			log.Printf("[Build] All workers completed, closing progress channel")
+			log.Printf("[Progress Closer] All workers finished. Closing progress channel.")
 			close(b.progressChan)
-			log.Printf("[Build] Progress channel closed")
+			log.Printf("[Progress Closer] Progress channel closed")
 		}()
 	}
 

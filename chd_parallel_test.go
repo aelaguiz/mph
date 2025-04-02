@@ -627,22 +627,56 @@ func TestBuildParallelExtensive(t *testing.T) {
 
 	go func() {
 		defer close(readDone)
-		log.Printf("[Test Reader] Starting progress reader goroutine")
+		startTime := time.Now()
+		log.Printf("[Test Reader] Starting progress reader goroutine at %v", startTime)
 		messageCount := 0
+		messagesPerAttempt := make(map[int]int)
+		stagesPerAttempt := make(map[int]map[string]int)
+		
 		for p := range progressChan {
+			receiveTime := time.Now()
 			messageCount++
-			log.Printf("[Test Reader] Received progress message #%d: AttemptID=%d, Stage=%s, Buckets=%d/%d, Collisions=%d",
-				messageCount, p.AttemptID, p.Stage, p.BucketsProcessed, p.TotalBuckets, p.CurrentBucketCollisions)
+			messagesPerAttempt[p.AttemptID]++
+			
+			// Track stages
+			if stagesPerAttempt[p.AttemptID] == nil {
+				stagesPerAttempt[p.AttemptID] = make(map[string]int)
+			}
+			stagesPerAttempt[p.AttemptID][p.Stage]++
+			
+			log.Printf("[Test Reader] Received message #%d at %v: AttemptID=%d, Stage=%s, Buckets=%d/%d, Collisions=%d",
+				messageCount, receiveTime, p.AttemptID, p.Stage, p.BucketsProcessed, p.TotalBuckets, p.CurrentBucketCollisions)
+			
 			progressMutex.Lock()
 			receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
 			progressMutex.Unlock()
 			
-			// Log specifically when we see a Complete message
+			// Special handling for Complete messages
 			if p.Stage == "Complete" {
-				log.Printf("[Test Reader] *** COMPLETE MESSAGE RECEIVED for AttemptID=%d ***", p.AttemptID)
+				log.Printf("[Test Reader] *** COMPLETE MESSAGE RECEIVED for AttemptID=%d at %v (message #%d) ***", 
+					p.AttemptID, receiveTime, messageCount)
 			}
 		}
-		log.Printf("[Test Reader] Progress reader goroutine finished (channel closed) after reading %d messages", messageCount)
+		
+		duration := time.Since(startTime)
+		log.Printf("[Test Reader] Progress reader goroutine finished after %v (channel closed)", duration)
+		log.Printf("[Test Reader] Total messages: %d", messageCount)
+		
+		// Log message counts by attempt ID
+		for id, count := range messagesPerAttempt {
+			log.Printf("[Test Reader] Attempt %d sent %d messages", id, count)
+			// Show stage breakdown
+			if stages := stagesPerAttempt[id]; stages != nil {
+				for stage, stageCount := range stages {
+					log.Printf("[Test Reader]   - Stage '%s': %d messages", stage, stageCount)
+				}
+				if stages["Complete"] > 0 {
+					log.Printf("[Test Reader]   - CONFIRMED: Received %d 'Complete' messages", stages["Complete"])
+				} else {
+					log.Printf("[Test Reader]   - WARNING: No 'Complete' messages received")
+				}
+			}
+		}
 	}()
 
 	buildDone := make(chan error)
@@ -660,16 +694,24 @@ func TestBuildParallelExtensive(t *testing.T) {
 		log.Printf("[Test Build Goroutine] Sent signal, now exiting")
 	}()
 
-	log.Printf("[Test Main] Waiting for buildDone signal...")
+	waitStartTime := time.Now()
+	log.Printf("[Test Main] Waiting for buildDone signal at %v...", waitStartTime)
 	
 	// Wait for build to finish
 	buildErr := <-buildDone
-	log.Printf("[Test Main] Received completion signal from buildDone. err=%v", buildErr)
+	buildDoneTime := time.Now()
+	buildWaitDuration := time.Since(waitStartTime)
+	log.Printf("[Test Main] Received completion signal from buildDone at %v (waited %v). err=%v", 
+		buildDoneTime, buildWaitDuration, buildErr)
 	
 	// Now wait for reader goroutine to finish (which happens when progress channel is closed by builder)
-	log.Printf("[Test Main] Waiting for reader goroutine to finish...")
+	log.Printf("[Test Main] Waiting for reader goroutine to finish at %v...", buildDoneTime)
+	readerWaitStart := time.Now()
 	<-readDone
-	log.Printf("[Test Main] Reader goroutine finished. Proceeding to analysis.")
+	readerDoneTime := time.Now()
+	readerWaitDuration := time.Since(readerWaitStart)
+	log.Printf("[Test Main] Reader goroutine finished at %v (waited %v). Proceeding to analysis.", 
+		readerDoneTime, readerWaitDuration)
 	duration := time.Since(startTime)
 	// --- End Build and Collect Progress ---
 
