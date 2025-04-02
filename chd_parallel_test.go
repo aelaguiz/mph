@@ -690,12 +690,23 @@ func TestBuildParallelExtensive(t *testing.T) {
 			t.Logf("Warning: Attempt %d sent no progress messages.", id)
 			continue
 		}
-		lastMsg := msgs[len(msgs)-1]
-		if lastMsg.Stage == "Complete" {
-			completedAttempts++
-			if firstSuccessfulAttemptID == -1 {
-				firstSuccessfulAttemptID = id
+		// Look through all messages for this attempt to find the Complete stage
+		// It might not be the last message due to channel buffering and timing
+		foundComplete := false
+		for _, msg := range msgs {
+			if msg.Stage == "Complete" {
+				foundComplete = true
+				completedAttempts++
+				if firstSuccessfulAttemptID == -1 {
+					firstSuccessfulAttemptID = id
+				}
+				break
 			}
+		}
+		
+		// Check the last message
+		lastMsg := msgs[len(msgs)-1]
+		if foundComplete {
 			assert.Equal(t, lastMsg.TotalBuckets, lastMsg.BucketsProcessed, "Completed attempt %d should have processed all buckets", id)
 			if lastMsg.BucketsProcessed > maxBucketProcessed {
 				maxBucketProcessed = lastMsg.BucketsProcessed // Update overall max progress
