@@ -650,74 +650,32 @@ func TestBuildParallelExtensive(t *testing.T) {
 			}
 			stagesPerAttempt[p.AttemptID][p.Stage]++
 			
-			log.Printf("[Test Reader] Received message #%d at %v: AttemptID=%d, Stage=%s, Buckets=%d/%d, Collisions=%d",
-				messageCount, receiveTime, p.AttemptID, p.Stage, p.BucketsProcessed, p.TotalBuckets, p.CurrentBucketCollisions)
+			// Track progress message statistics
 			
 			progressMutex.Lock()
 			receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
 			progressMutex.Unlock()
 			
-			// Special handling for Complete messages
-			if p.Stage == "Complete" {
-				log.Printf("[Test Reader] *** COMPLETE MESSAGE RECEIVED for AttemptID=%d at %v (message #%d) ***", 
-					p.AttemptID, receiveTime, messageCount)
-			}
+			// Track Complete messages
 		}
 		
-		duration := time.Since(startTime)
-		log.Printf("[Test Reader] Progress reader goroutine finished after %v (channel closed)", duration)
-		log.Printf("[Test Reader] Total messages: %d", messageCount)
-		
-		// Log message counts by attempt ID
-		for id, count := range messagesPerAttempt {
-			log.Printf("[Test Reader] Attempt %d sent %d messages", id, count)
-			// Show stage breakdown
-			if stages := stagesPerAttempt[id]; stages != nil {
-				for stage, stageCount := range stages {
-					log.Printf("[Test Reader]   - Stage '%s': %d messages", stage, stageCount)
-				}
-				if stages["Complete"] > 0 {
-					log.Printf("[Test Reader]   - CONFIRMED: Received %d 'Complete' messages", stages["Complete"])
-				} else {
-					log.Printf("[Test Reader]   - WARNING: No 'Complete' messages received")
-				}
-			}
-		}
+		// Track statistics on received messages in messagesPerAttempt and stagesPerAttempt
 	}()
 
 	buildDone := make(chan error)
 	var builtCHD *CHD
 	startTime = time.Now()
 	go func() {
-		startTime := time.Now()
 		builtCHD, err = buildCHDFromSlices(t, keys, vals, builder)
-		buildDuration := time.Since(startTime)
-		log.Printf("[Test Build Goroutine] buildCHDFromSlices completed in %v. err=%v", buildDuration, err)
-		// Signal build completion first
-		log.Printf("[Test Build Goroutine] Sending completion signal on buildDone")
 		buildDone <- err
-		// DO NOT close progressChan here - the builder will do it after all workers complete
-		log.Printf("[Test Build Goroutine] Sent signal, now exiting")
 	}()
 
-	waitStartTime := time.Now()
-	log.Printf("[Test Main] Waiting for buildDone signal at %v...", waitStartTime)
-	
 	// Wait for build to finish
 	buildErr := <-buildDone
-	buildDoneTime := time.Now()
-	buildWaitDuration := time.Since(waitStartTime)
-	log.Printf("[Test Main] Received completion signal from buildDone at %v (waited %v). err=%v", 
-		buildDoneTime, buildWaitDuration, buildErr)
 	
-	// Now wait for reader goroutine to finish (which happens when progress channel is closed by builder)
-	log.Printf("[Test Main] Waiting for reader goroutine to finish at %v...", buildDoneTime)
-	readerWaitStart := time.Now()
+	// Wait for reader goroutine to finish (happens when progress channel is closed)
 	<-readDone
-	readerDoneTime := time.Now()
-	readerWaitDuration := time.Since(readerWaitStart)
-	log.Printf("[Test Main] Reader goroutine finished at %v (waited %v). Proceeding to analysis.", 
-		readerDoneTime, readerWaitDuration)
+	
 	duration := time.Since(startTime)
 	// --- End Build and Collect Progress ---
 
@@ -733,17 +691,7 @@ func TestBuildParallelExtensive(t *testing.T) {
 	progressMutex.Lock() // Lock map for final analysis
 	defer progressMutex.Unlock()
 	
-	// Diagnostic logging to see the final state
-	log.Printf("[Test Main] Final state of receivedProgress map:")
-	for id, msgs := range receivedProgress {
-		if len(msgs) > 0 {
-			lastMsg := msgs[len(msgs)-1]
-			log.Printf("[Test Main]   AttemptID=%d, messages=%d, last stage=%s, buckets=%d/%d", 
-				id, len(msgs), lastMsg.Stage, lastMsg.BucketsProcessed, lastMsg.TotalBuckets)
-		} else {
-			log.Printf("[Test Main]   AttemptID=%d, no messages", id)
-		}
-	}
+	// Analyze collected progress data
 
 	require.GreaterOrEqualf(t, len(receivedProgress), 1, "Should have received progress from at least one attempt (got %d)", len(receivedProgress))
 	// Ideally, we see progress from multiple attempts if the first didn't succeed instantly

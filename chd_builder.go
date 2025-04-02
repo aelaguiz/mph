@@ -280,11 +280,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 			attemptID := attemptIdx + 1 // 1-based ID
 
 			// Pass the context to the internal build function
-			log.Printf("[Build Worker %d] Starting buildInternal with seed %d", attemptID, seed)
-			startTime := time.Now() // Log duration of buildInternal
 			chdResult, errResult := b.buildInternal(ctx, seed, attemptID)
-			duration := time.Since(startTime)
-			log.Printf("[Build Worker %d] buildInternal finished. err=%v, duration: %v", attemptID, errResult, duration)
 
 			// Send result regardless of context cancellation state for now.
 			// The receiver loop will handle ignoring late results.
@@ -327,10 +323,8 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 			if result.err == nil && result.chd != nil {
 				// First success!
 				if firstSuccess == nil {
-					log.Printf("[Build] First success from Attempt %d. Cancelling others.", result.attemptID)
 					firstSuccess = result.chd
-					cancel() // Signal other goroutines to stop (they might not react yet in 6b)
-					log.Printf("[Build] Context cancel() function called.")
+					cancel() // Signal other goroutines to stop
 					// Note: We still loop numAttempts times to drain the channel,
 					// but we've captured the first success.
 				}
@@ -367,7 +361,7 @@ func (b *CHDBuilder) Build() (*CHD, error) {
 // buildInternal performs a single attempt to build the CHD table using a specific seed.
 // buildInternal performs a single attempt to build the CHD table using a specific seed.
 // It checks the provided context for cancellation requests.
-func (b *CHDBuilder) buildInternal(ctx context.Context, buildSeed int64, attemptID int) (finalCHD *CHD, finalErr error) {
+func (b *CHDBuilder) buildInternal(ctx context.Context, buildSeed int64, attemptID int) (*CHD, error) {
 	// Use named return values to facilitate logging before returning
 	defer func() {
 		log.Printf("[buildInternal %d] Returning. err=%v", attemptID, finalErr)
@@ -552,7 +546,6 @@ nextBucket:
 
 	// If we got here, packing is done. Send Complete and return success.
 	// Do NOT check for cancellation here, otherwise the winning goroutine might fail to report success.
-	log.Printf("[buildInternal %d] Packing complete. Sending 'Complete' progress...", attemptID)
 	
 	completeProgress := BuildProgress{
 		BucketsProcessed: totalBuckets,
@@ -562,7 +555,6 @@ nextBucket:
 	}
 	b.sendProgress(completeProgress, attemptID)
 	
-	log.Printf("[buildInternal %d] 'Complete' progress message sent. Successfully built CHD object.", attemptID)
 	finalCHD = &CHD{
 		r:       hasher.r,
 		indices: indices,
