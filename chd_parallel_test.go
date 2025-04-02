@@ -569,6 +569,142 @@ func TestBuildParallelContextCancellation(t *testing.T) {
 	t.Log("Parallel build with cancellation completed successfully")
 }
 
+// TestBuildParallelExtensive forces multiple parallel attempts with a constrained
+// retry limit, verifying that parallelism allows the build to succeed and
+// that cancellation stops non-winning attempts.
+func TestBuildParallelExtensive(t *testing.T) {
+	// Use a larger dataset
+	numKeys := 50000
+	base := "aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ0123456789"
+	t.Logf("Generating %d potentially tricky keys...", numKeys)
+	
+	// Use parallel generation with number of workers based on CPU count
+	numWorkers := runtime.NumCPU()
+	t.Logf("Using %d workers for parallel key generation", numWorkers)
+	
+	startTime := time.Now()
+	keys := generateSimilarKeysParallel(base[:40], numKeys, nil, numWorkers) // Random swaps on 40 char base
+	keyGenDuration := time.Since(startTime)
+	
+	// Generate values in parallel too
+	startTime = time.Now()
+	vals := generateValuesParallel(len(keys), numWorkers)
+	valGenDuration := time.Since(startTime)
+	
+	t.Logf("Generated %d keys in %v (keys) and %v (values)", len(keys), keyGenDuration, valGenDuration)
+
+	// Configure for extensive parallelism
+	numAttempts := runtime.NumCPU() // Use all available CPU cores
+	if numAttempts < 2 {
+		numAttempts = 2 // Ensure at least 2 attempts for testing parallelism
+	}
+	// Lower retry limit significantly - adjust this based on observations if needed
+	// Needs to be low enough to make single attempts potentially fail/slow,
+	// but high enough that *some* seed is likely to succeed.
+	retryLimit := 15000 // << TUNABLE PARAMETER
+	
+	// Estimate buffer size: numAttempts * buckets * avg_retries_per_bucket (roughly)
+	// This is hard to predict, so oversize it.
+	progressBufferSize := numAttempts * (len(keys)/2) / 5 // Heuristic, adjust if needed
+	if progressBufferSize < 1000 { progressBufferSize = 1000 }
+	
+	progressChan := make(chan BuildProgress, progressBufferSize)
+
+	builder := Builder().ProgressChan(progressChan)
+	_, err := builder.ParallelAttempts(numAttempts)
+	require.NoError(t, err)
+	_, err = builder.RetryLimit(retryLimit)
+	require.NoError(t, err)
+	// No specific seed set - let the first attempt use time, others random.
+
+	t.Logf("Starting build with %d parallel attempts, retry limit %d", numAttempts, retryLimit)
+
+	// --- Run Build and Collect Progress Concurrently ---
+	readDone := make(chan struct{})
+	receivedProgress := make(map[int][]BuildProgress) // Map by AttemptID
+	var progressMutex sync.Mutex // Protect map access from concurrent reads
+
+	go func() {
+		defer close(readDone)
+		for p := range progressChan {
+			progressMutex.Lock()
+			receivedProgress[p.AttemptID] = append(receivedProgress[p.AttemptID], p)
+			progressMutex.Unlock()
+		}
+	}()
+
+	buildDone := make(chan error)
+	var builtCHD *CHD
+	startTime = time.Now()
+	go func() {
+		builtCHD, err = buildCHDFromSlices(t, keys, vals, builder)
+		// Close progressChan *after* build is fully complete
+		close(progressChan)
+		buildDone <- err // Signal build completion status
+	}()
+
+	// Wait for build to finish
+	buildErr := <-buildDone
+	// Wait for reading goroutine to finish processing all messages
+	<-readDone
+	duration := time.Since(startTime)
+	// --- End Build and Collect Progress ---
+
+	t.Logf("Build finished in %v. Error: %v", duration, buildErr)
+
+	// --- Assertions ---
+	require.NoError(t, buildErr, "Build expected to succeed due to parallel attempts finding a working seed within the retry limit")
+	require.NotNil(t, builtCHD)
+	assert.Equal(t, len(keys), builtCHD.Len()) // Verify size
+
+	// Analyze collected progress
+	progressMutex.Lock() // Lock map for final analysis
+	defer progressMutex.Unlock()
+
+	require.GreaterOrEqualf(t, len(receivedProgress), 1, "Should have received progress from at least one attempt (got %d)", len(receivedProgress))
+	// Ideally, we see progress from multiple attempts if the first didn't succeed instantly
+	t.Logf("Received progress reports from %d distinct attempts.", len(receivedProgress))
+
+	firstSuccessfulAttemptID := -1
+	completedAttempts := 0
+	cancelledAttempts := 0
+	maxBucketProcessed := 0 // Track overall progress
+
+	for id, msgs := range receivedProgress {
+		if len(msgs) == 0 {
+			t.Logf("Warning: Attempt %d sent no progress messages.", id)
+			continue
+		}
+		lastMsg := msgs[len(msgs)-1]
+		if lastMsg.Stage == "Complete" {
+			completedAttempts++
+			if firstSuccessfulAttemptID == -1 {
+				firstSuccessfulAttemptID = id
+			}
+			assert.Equal(t, lastMsg.TotalBuckets, lastMsg.BucketsProcessed, "Completed attempt %d should have processed all buckets", id)
+			if lastMsg.BucketsProcessed > maxBucketProcessed {
+				maxBucketProcessed = lastMsg.BucketsProcessed // Update overall max progress
+			}
+		} else {
+			cancelledAttempts++
+			t.Logf("Attempt %d likely cancelled (last stage: %s, buckets: %d/%d)", id, lastMsg.Stage, lastMsg.BucketsProcessed, lastMsg.TotalBuckets)
+			if lastMsg.BucketsProcessed > maxBucketProcessed {
+				maxBucketProcessed = lastMsg.BucketsProcessed // Update overall max progress even if cancelled
+			}
+		}
+	}
+
+	assert.NotEqualf(t, -1, firstSuccessfulAttemptID, "Expected one attempt (%d total attempts ran) to complete successfully", len(receivedProgress))
+	assert.Equal(t, 1, completedAttempts, "Expected exactly one attempt to report 'Complete' stage")
+	// Check that if multiple attempts sent progress, some were cancelled
+	if len(receivedProgress) > 1 {
+		assert.GreaterOrEqual(t, cancelledAttempts, len(receivedProgress)-1, "Expected non-winning attempts to be cancelled")
+	}
+
+	t.Logf("Analysis complete. Winning attempt: %d. Completed: %d. Cancelled: %d. Max buckets reached by any process: %d",
+		firstSuccessfulAttemptID, completedAttempts, cancelledAttempts, maxBucketProcessed)
+}
+
 // TestBuildWithDifficultDataset attempts to build using a dataset designed
 // to potentially cause more hash collisions, testing the retry limit and parallel attempts.
 func TestBuildWithDifficultDataset(t *testing.T) {
